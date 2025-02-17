@@ -1,9 +1,11 @@
-# ConnectorX [![status][ci_badge]][ci_page] [![discussions][discussion_badge]][discussion_page]
+# ConnectorX [![status][ci_badge]][ci_page] [![discussions][discussion_badge]][discussion_page] [![Downloads][download_badge]][download_page]
 
 [ci_badge]: https://github.com/sfu-db/connector-x/workflows/ci/badge.svg
 [ci_page]: https://github.com/sfu-db/connector-x/actions
 [discussion_badge]: https://img.shields.io/badge/Forum-Github%20Discussions-blue
 [discussion_page]: https://github.com/sfu-db/connector-x/discussions
+[download_badge]: https://pepy.tech/badge/connectorx
+[download_page]: https://pepy.tech/project/connectorx
 
 Load data from <img src="https://raw.githubusercontent.com/sfu-db/connector-x/main/assets/sources.gif" width="6.5%" style="margin-bottom: -2px"/> to <img src="https://raw.githubusercontent.com/sfu-db/connector-x/main/assets/destinations.gif" width="7%" style="margin-bottom: -2px"/>, the fastest way.
 
@@ -29,13 +31,24 @@ The function will partition the query by **evenly** splitting the specified colu
 ConnectorX will assign one thread for each partition to load and write data in parallel.
 Currently, we support partitioning on **numerical** columns (**cannot contain NULL**) for **SPJA** queries. 
 
-Check out more detailed usage and examples [here](#detailed-usage-and-examples). A general introduction of the project can be found in this [blog post](https://towardsdatascience.com/connectorx-the-fastest-way-to-load-data-from-databases-a65d4d4062d5).
+**Experimental: We are now providing federated query support, you can write a single query to join tables from two or more databases!**
+```python
+import connectorx as cx
+db1 = "postgresql://username1:password1@server1:port1/database1"
+db2 = "postgresql://username2:password2@server2:port2/database2"
+cx.read_sql({"db1": db1, "db2": db2}, "SELECT * FROM db1.nation n, db2.region r where n.n_regionkey = r.r_regionkey")
+```
+By default, we pushdown all joins from the same data source. More details for setup and configuration can be found [here](https://github.com/sfu-db/connector-x/blob/main/Federation.md).
+
+Check out more detailed usage and examples [here](https://sfu-db.github.io/connector-x/api.html). A general introduction of the project can be found in this [blog post](https://towardsdatascience.com/connectorx-the-fastest-way-to-load-data-from-databases-a65d4d4062d5).
 
 # Installation
 
 ```bash
 pip install connectorx
 ```
+
+Check out [here](https://sfu-db.github.io/connector-x/install.html#build-from-source-code) to see how to build python wheel from source.
 
 # Performance
 
@@ -51,7 +64,7 @@ We compared different solutions in Python that provides the `read_sql` function,
 
 In conclusion, ConnectorX uses up to **3x** less memory and **21x** less time (**3x** less memory and **13x** less time compared with Pandas.). More on [here](https://github.com/sfu-db/connector-x/blob/main/Benchmark.md#benchmark-result-on-aws-r54xlarge).
 
-## How does ConnectorX achieve a lightening speed while keeping the memory footprint low?
+## How does ConnectorX achieve a lightning speed while keeping the memory footprint low?
 
 We observe that existing solutions more or less do data copy multiple times when downloading the data.
 Additionally, implementing a data intensive application in Python brings additional cost.
@@ -73,18 +86,11 @@ Finally, ConnectorX will use the schema info as well as the count info to alloca
 Once the downloading begins, there will be one thread for each partition so that the data are downloaded in parallel at the partition level. The thread will issue the query of the corresponding
 partition to the database and then write the returned data to the destination row-wise or column-wise (depends on the database) in a streaming fashion. 
 
-#### How to specify the partition number?
-
-`partition_num` will determine how many queries we are going to split from the original one and issue to the database. Underlying, we use [rayon](https://github.com/rayon-rs/rayon) as our parallel executor, which adopts a pool of threads to handle each partitioned query. The number of threads in the pool equals to the number of logical cores on the machine. It is recommended to set the `partition_num` to the number of available logical cores.
-
-#### How to choose the partition column?
-
-`partition_on` specifies on which column we will do the partition as above procedure. In order to achieve the best performance, it is ideal that each partitioned query will return the same number of rows. And since we partition the column evenly, it is recommended that the numerical `partition_on` column is evenly distributed. Whether a column has index or not might also affect the performance depends on the source database. You can give it a try if you have multiple candidates. Also, you can manually partition the query if our partition method cannot match your need. ConnectorX will still return a whole dataframe with all the results of the list of queries you input.
-
 
 # Supported Sources & Destinations
 
-Supported protocols, data types and type mappings can be found [here](Types.md).
+Example connection string, supported protocols and data types for each data source can be found [here](https://sfu-db.github.io/connector-x/databases.html).
+
 For more planned data sources, please check out our [discussion](https://github.com/sfu-db/connector-x/discussions/61).
 
 ## Sources
@@ -97,7 +103,9 @@ For more planned data sources, please check out our [discussion](https://github.
 - [x] SQL Server
 - [x] Azure SQL Database (through mssql protocol)
 - [x] Oracle
-- [ ] Big Query - In Progress
+- [x] Big Query
+- [x] Trino
+- [ ] ODBC (WIP)
 - [ ] ...
 
 ## Destinations
@@ -106,94 +114,11 @@ For more planned data sources, please check out our [discussion](https://github.
 - [x] Modin (through Pandas)
 - [x] Dask (through Pandas)
 - [x] Polars (through PyArrow)
-  
-# Detailed Usage and Examples
 
+# Documentation
+
+Doc: https://sfu-db.github.io/connector-x/intro.html
 Rust docs: [stable](https://docs.rs/connectorx) [nightly](https://sfu-db.github.io/connector-x/connectorx/)
-
-## API
-
-```python
-connectorx.read_sql(conn: str, query: Union[List[str], str], *, return_type: str = "pandas", protocol: str = "binary", partition_on: Optional[str] = None, partition_range: Optional[Tuple[int, int]] = None, partition_num: Optional[int] = None)
-```
-
-Run the SQL query, download the data from database into a Pandas dataframe.
-
-## Parameters
-- `conn: str`: Connection string URI.
-  - General supported URI scheme: `(postgres|postgressql|mysql|mssql)://username:password@addr:port/dbname`.
-  - For now sqlite only support absolute path, example: `sqlite:///home/user/path/test.db`.
-  - Please check out [here](Types.md) for more connection uri parameters supported for each database (e.g. trusted_connection for Mssql, sslmode for Postgres)
-- `query: Union[str, List[str]]`: SQL query or list of SQL queries for fetching data.
-- `return_type: str = "pandas"`: The return type of this function. It can be `arrow`, `pandas`, `modin`, `dask` or `polars`.
-- `protocol: str = "binary"`: The protocol used to fetch data from source, default is `binary`. Check out [here](Types.md) to see more details.
-- `partition_on: Optional[str]`: The column to partition the result.
-- `partition_range: Optional[Tuple[int, int]]`: The value range of the partition column.
-- `partition_num: Optioinal[int]`: The number of partitions to generate.
-- `index_col: Optioinal[str]`: The index column to set for the result dataframe. Only applicable when `return_type` is `pandas`, `modin` or `dask`. 
-
-## Examples
-- Read a DataFrame from a SQL using a single thread
-
-  ```python
-  import connectorx as cx
-
-  postgres_url = "postgresql://username:password@server:port/database"
-  query = "SELECT * FROM lineitem"
-
-  cx.read_sql(postgres_url, query)
-  ```
-
-- Read a DataFrame parallelly using 10 threads by automatically partitioning the provided SQL on the partition column (`partition_range` will be automatically  queried if not given)
-
-  ```python
-  import connectorx as cx
-
-  postgres_url = "postgresql://username:password@server:port/database"
-  query = "SELECT * FROM lineitem"
-
-  cx.read_sql(postgres_url, query, partition_on="l_orderkey", partition_num=10)
-  ```
-
-- Read a DataFrame parallelly using 2 threads by manually providing two partition SQLs (the schemas of all the query results should be same)
-
-  ```python
-  import connectorx as cx
-
-  postgres_url = "postgresql://username:password@server:port/database"
-  queries = ["SELECT * FROM lineitem WHERE l_orderkey <= 30000000", "SELECT * FROM lineitem WHERE l_orderkey > 30000000"]
-
-  cx.read_sql(postgres_url, queries)
-
-  ```
-  
-- Read a DataFrame parallelly using 4 threads from a more complex query
-
-  ```python
-  import connectorx as cx
-
-  postgres_url = "postgresql://username:password@server:port/database"
-  query = f"""
-  SELECT l_orderkey,
-         SUM(l_extendedprice * ( 1 - l_discount )) AS revenue,
-         o_orderdate,
-         o_shippriority
-  FROM   customer,
-         orders,
-         lineitem
-  WHERE  c_mktsegment = 'BUILDING'
-         AND c_custkey = o_custkey
-         AND l_orderkey = o_orderkey
-         AND o_orderdate < DATE '1995-03-15'
-         AND l_shipdate > DATE '1995-03-15'
-  GROUP  BY l_orderkey,
-            o_orderdate,
-            o_shippriority 
-  """
-
-  cx.read_sql(postgres_url, query, partition_on="l_orderkey", partition_num=4)
-
-  ```
 
 # Next Plan
 
@@ -209,13 +134,418 @@ Please see [Developer's Guide](https://github.com/sfu-db/connector-x/blob/main/C
 # Supports
 
 You are always welcomed to:
-1. Ask questions in stackoverflow. Make sure to have #connectorx attached.
-2. Ask questions & propose new ideas in our [forum][discussion_page].
-3. Ask questions & join the discussion & send direct messages to us in our [discord](https://discord.gg/xwbkFNk) (under `CONNECTOR` category)
+1. Ask questions & propose new ideas in our github [discussion][discussion_page].
+2. Ask questions in stackoverflow. Make sure to have #connectorx attached.
 
 # Organizations and Projects using ConnectorX
 
-[<img src="https://raw.githubusercontent.com/pola-rs/polars-static/master/logos/polars-logo-dark.svg" height="100" style="margin-bottom: -2px"/>](https://github.com/pola-rs/polars)
-[<img src="https://raw.githubusercontent.com/sfu-db/dataprep/develop/assets/logo.png" height="100" style="margin-bottom: -2px"/>](https://dataprep.ai/)
+[<img src="https://raw.githubusercontent.com/pola-rs/polars-static/master/logos/polars-logo-dark.svg" height="60" style="margin-bottom: -2px"/>](https://github.com/pola-rs/polars)
+[<img src="https://raw.githubusercontent.com/sfu-db/dataprep/develop/assets/logo.png" height="60" style="margin-bottom: -2px"/>](https://dataprep.ai/)
+[<img src="https://github.com/modin-project/modin/blob/3d6368edf311995ad231ec5342a51cd9e4e3dc20/docs/img/MODIN_ver2_hrz.png?raw=true" height="60" style="margin-bottom: -2px"/>](https://modin.readthedocs.io)
 
 To add your project/organization here, reply our post [here](https://github.com/sfu-db/connector-x/discussions/146)
+
+# Citing ConnectorX
+
+If you use ConnectorX, please consider citing the following paper:
+
+Xiaoying Wang, Weiyuan Wu, Jinze Wu, Yizhou Chen, Nick Zrymiak, Changbo Qu, Lampros Flokas, George Chow, Jiannan Wang, Tianzheng Wang, Eugene Wu, Qingqing Zhou. [ConnectorX: Accelerating Data Loading From Databases to Dataframes.](https://www.vldb.org/pvldb/vol15/p2994-wang.pdf) _VLDB 2022_.
+
+BibTeX entry:
+
+```bibtex
+@article{connectorx2022,
+  author    = {Xiaoying Wang and Weiyuan Wu and Jinze Wu and Yizhou Chen and Nick Zrymiak and Changbo Qu and Lampros Flokas and George Chow and Jiannan Wang and Tianzheng Wang and Eugene Wu and Qingqing Zhou},
+  title     = {ConnectorX: Accelerating Data Loading From Databases to Dataframes},
+  journal   = {Proc. {VLDB} Endow.},
+  volume    = {15},
+  number    = {11},
+  pages     = {2994--3003},
+  year      = {2022},
+  url       = {https://www.vldb.org/pvldb/vol15/p2994-wang.pdf},
+}
+```
+
+# Contributors
+
+<!-- readme: contributors -start -->
+<table>
+	<tbody>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/wangxiaoying">
+                    <img src="https://avatars.githubusercontent.com/u/5569610?v=4" width="66;" alt="wangxiaoying"/>
+                    <br />
+                    <sub><b>Xiaoying Wang</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/dovahcrow">
+                    <img src="https://avatars.githubusercontent.com/u/998606?v=4" width="66;" alt="dovahcrow"/>
+                    <br />
+                    <sub><b>Weiyuan Wu</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/Wukkkinz-0725">
+                    <img src="https://avatars.githubusercontent.com/u/60677420?v=4" width="66;" alt="Wukkkinz-0725"/>
+                    <br />
+                    <sub><b>Null</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/Yizhou150">
+                    <img src="https://avatars.githubusercontent.com/u/62522644?v=4" width="66;" alt="Yizhou150"/>
+                    <br />
+                    <sub><b>Yizhou</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/EricFecteau">
+                    <img src="https://avatars.githubusercontent.com/u/96687807?v=4" width="66;" alt="EricFecteau"/>
+                    <br />
+                    <sub><b>EricFecteau</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/zen-xu">
+                    <img src="https://avatars.githubusercontent.com/u/38552291?v=4" width="66;" alt="zen-xu"/>
+                    <br />
+                    <sub><b>ZhengYu, Xu</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/domnikl">
+                    <img src="https://avatars.githubusercontent.com/u/603116?v=4" width="66;" alt="domnikl"/>
+                    <br />
+                    <sub><b>Dominik Liebler</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/wseaton">
+                    <img src="https://avatars.githubusercontent.com/u/16678729?v=4" width="66;" alt="wseaton"/>
+                    <br />
+                    <sub><b>Will Eaton</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/AnatolyBuga">
+                    <img src="https://avatars.githubusercontent.com/u/60788447?v=4" width="66;" alt="AnatolyBuga"/>
+                    <br />
+                    <sub><b>Anatoly Bugakov</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/Jordan-M-Young">
+                    <img src="https://avatars.githubusercontent.com/u/54070169?v=4" width="66;" alt="Jordan-M-Young"/>
+                    <br />
+                    <sub><b>Jordan M. Young</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/jsjasonseba">
+                    <img src="https://avatars.githubusercontent.com/u/46563896?v=4" width="66;" alt="jsjasonseba"/>
+                    <br />
+                    <sub><b>Jason</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/auyer">
+                    <img src="https://avatars.githubusercontent.com/u/12375421?v=4" width="66;" alt="auyer"/>
+                    <br />
+                    <sub><b>Rafael Passos</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/pangjunrong">
+                    <img src="https://avatars.githubusercontent.com/u/61274749?v=4" width="66;" alt="pangjunrong"/>
+                    <br />
+                    <sub><b>Pang Jun Rong (Jayden)</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/gruuya">
+                    <img src="https://avatars.githubusercontent.com/u/45558892?v=4" width="66;" alt="gruuya"/>
+                    <br />
+                    <sub><b>Marko Grujic</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/jinzew">
+                    <img src="https://avatars.githubusercontent.com/u/55274369?v=4" width="66;" alt="jinzew"/>
+                    <br />
+                    <sub><b>Null</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/alswang18">
+                    <img src="https://avatars.githubusercontent.com/u/44207558?v=4" width="66;" alt="alswang18"/>
+                    <br />
+                    <sub><b>Alec Wang</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/lBilali">
+                    <img src="https://avatars.githubusercontent.com/u/5528169?v=4" width="66;" alt="lBilali"/>
+                    <br />
+                    <sub><b>Lulzim Bilali</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/ritchie46">
+                    <img src="https://avatars.githubusercontent.com/u/3023000?v=4" width="66;" alt="ritchie46"/>
+                    <br />
+                    <sub><b>Ritchie Vink</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/houqp">
+                    <img src="https://avatars.githubusercontent.com/u/670302?v=4" width="66;" alt="houqp"/>
+                    <br />
+                    <sub><b>QP Hou</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/wKollendorf">
+                    <img src="https://avatars.githubusercontent.com/u/83725977?v=4" width="66;" alt="wKollendorf"/>
+                    <br />
+                    <sub><b>Null</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/CBQu">
+                    <img src="https://avatars.githubusercontent.com/u/16992497?v=4" width="66;" alt="CBQu"/>
+                    <br />
+                    <sub><b>CbQu</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/quambene">
+                    <img src="https://avatars.githubusercontent.com/u/33333672?v=4" width="66;" alt="quambene"/>
+                    <br />
+                    <sub><b>Null</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/jorgecarleitao">
+                    <img src="https://avatars.githubusercontent.com/u/2772607?v=4" width="66;" alt="jorgecarleitao"/>
+                    <br />
+                    <sub><b>Jorge Leitao</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/glennpierce">
+                    <img src="https://avatars.githubusercontent.com/u/691783?v=4" width="66;" alt="glennpierce"/>
+                    <br />
+                    <sub><b>Glenn Pierce</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/alexander-beedie">
+                    <img src="https://avatars.githubusercontent.com/u/2613171?v=4" width="66;" alt="alexander-beedie"/>
+                    <br />
+                    <sub><b>Alexander Beedie</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/FerriLuli">
+                    <img src="https://avatars.githubusercontent.com/u/110925223?v=4" width="66;" alt="FerriLuli"/>
+                    <br />
+                    <sub><b>FerriLuli</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/therealhieu">
+                    <img src="https://avatars.githubusercontent.com/u/38937534?v=4" width="66;" alt="therealhieu"/>
+                    <br />
+                    <sub><b>Hieu Minh Nguyen</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/JakkuSakura">
+                    <img src="https://avatars.githubusercontent.com/u/33482468?v=4" width="66;" alt="JakkuSakura"/>
+                    <br />
+                    <sub><b>Jakku Sakura</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/maxb2">
+                    <img src="https://avatars.githubusercontent.com/u/9096667?v=4" width="66;" alt="maxb2"/>
+                    <br />
+                    <sub><b>Matthew Anderson</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/tschm">
+                    <img src="https://avatars.githubusercontent.com/u/2046079?v=4" width="66;" alt="tschm"/>
+                    <br />
+                    <sub><b>Thomas Schmelzer</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/marianoguerra">
+                    <img src="https://avatars.githubusercontent.com/u/68463?v=4" width="66;" alt="marianoguerra"/>
+                    <br />
+                    <sub><b>Mariano Guerra</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/MatsMoll">
+                    <img src="https://avatars.githubusercontent.com/u/4439131?v=4" width="66;" alt="MatsMoll"/>
+                    <br />
+                    <sub><b>Mats Eikeland Mollestad</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/rursprung">
+                    <img src="https://avatars.githubusercontent.com/u/39383228?v=4" width="66;" alt="rursprung"/>
+                    <br />
+                    <sub><b>Ralph Ursprung</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/albcunha">
+                    <img src="https://avatars.githubusercontent.com/u/13671325?v=4" width="66;" alt="albcunha"/>
+                    <br />
+                    <sub><b>Null</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/kotval">
+                    <img src="https://avatars.githubusercontent.com/u/11917243?v=4" width="66;" alt="kotval"/>
+                    <br />
+                    <sub><b>Kotval</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/messense">
+                    <img src="https://avatars.githubusercontent.com/u/1556054?v=4" width="66;" alt="messense"/>
+                    <br />
+                    <sub><b>Messense</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/phanindra-ramesh">
+                    <img src="https://avatars.githubusercontent.com/u/16794420?v=4" width="66;" alt="phanindra-ramesh"/>
+                    <br />
+                    <sub><b>Null</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/surister">
+                    <img src="https://avatars.githubusercontent.com/u/37985796?v=4" width="66;" alt="surister"/>
+                    <br />
+                    <sub><b>Ivan</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/venkashank">
+                    <img src="https://avatars.githubusercontent.com/u/27744439?v=4" width="66;" alt="venkashank"/>
+                    <br />
+                    <sub><b>Null</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/zemelLeong">
+                    <img src="https://avatars.githubusercontent.com/u/26835087?v=4" width="66;" alt="zemelLeong"/>
+                    <br />
+                    <sub><b>zemel leong</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/zzzdong">
+                    <img src="https://avatars.githubusercontent.com/u/5125482?v=4" width="66;" alt="zzzdong"/>
+                    <br />
+                    <sub><b>Null</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/kevinheavey">
+                    <img src="https://avatars.githubusercontent.com/u/24635973?v=4" width="66;" alt="kevinheavey"/>
+                    <br />
+                    <sub><b>Kevin Heavey</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/kayhoogland">
+                    <img src="https://avatars.githubusercontent.com/u/22837350?v=4" width="66;" alt="kayhoogland"/>
+                    <br />
+                    <sub><b>Kay Hoogland</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/DeflateAwning">
+                    <img src="https://avatars.githubusercontent.com/u/11021263?v=4" width="66;" alt="DeflateAwning"/>
+                    <br />
+                    <sub><b>DeflateAwning</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/deepsourcebot">
+                    <img src="https://avatars.githubusercontent.com/u/60907429?v=4" width="66;" alt="deepsourcebot"/>
+                    <br />
+                    <sub><b>DeepSource Bot</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/bealdav">
+                    <img src="https://avatars.githubusercontent.com/u/1853434?v=4" width="66;" alt="bealdav"/>
+                    <br />
+                    <sub><b>David Beal</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/AndrewJackson2020">
+                    <img src="https://avatars.githubusercontent.com/u/46945903?v=4" width="66;" alt="AndrewJackson2020"/>
+                    <br />
+                    <sub><b>Andrew Jackson</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/Cabbagec">
+                    <img src="https://avatars.githubusercontent.com/u/14164987?v=4" width="66;" alt="Cabbagec"/>
+                    <br />
+                    <sub><b>Brandon</b></sub>
+                </a>
+            </td>
+		</tr>
+		<tr>
+            <td align="center">
+                <a href="https://github.com/Amar1729">
+                    <img src="https://avatars.githubusercontent.com/u/15623522?v=4" width="66;" alt="Amar1729"/>
+                    <br />
+                    <sub><b>Amar Paul</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/aljazerzen">
+                    <img src="https://avatars.githubusercontent.com/u/11072061?v=4" width="66;" alt="aljazerzen"/>
+                    <br />
+                    <sub><b>Aljaž Mur Eržen</b></sub>
+                </a>
+            </td>
+            <td align="center">
+                <a href="https://github.com/aimtsou">
+                    <img src="https://avatars.githubusercontent.com/u/2598924?v=4" width="66;" alt="aimtsou"/>
+                    <br />
+                    <sub><b>Aimilios Tsouvelekakis</b></sub>
+                </a>
+            </td>
+		</tr>
+	<tbody>
+</table>
+<!-- readme: contributors -end -->

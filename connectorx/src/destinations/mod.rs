@@ -3,9 +3,8 @@
 
 #[cfg(feature = "dst_arrow")]
 pub mod arrow;
-
-#[cfg(feature = "dst_arrow2")]
-pub mod arrow2;
+#[cfg(feature = "dst_arrow")]
+pub mod arrowstream;
 
 use crate::data_order::DataOrder;
 use crate::errors::ConnectorXError;

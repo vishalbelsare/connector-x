@@ -11,6 +11,7 @@ use rust_decimal::prelude::*;
 use serde_json::{to_string, Value};
 use std::marker::PhantomData;
 
+#[allow(dead_code)]
 pub struct MysqlPandasTransport<'py, P>(&'py (), PhantomData<P>);
 
 impl_transport!(
@@ -45,6 +46,7 @@ impl_transport!(
         { MediumBlob[Vec<u8>]        => Bytes[Vec<u8>]          | conversion none }
         { LongBlob[Vec<u8>]          => Bytes[Vec<u8>]          | conversion none }
         { Json[Value]                => String[String]          | conversion option }
+        { Bit[Vec<u8>]               => Bytes[Vec<u8>]          | conversion none }
     }
 );
 
@@ -80,12 +82,17 @@ impl_transport!(
         { MediumBlob[Vec<u8>]        => Bytes[Vec<u8>]          | conversion none }
         { LongBlob[Vec<u8>]          => Bytes[Vec<u8>]          | conversion none }
         { Json[Value]                => String[String]          | conversion option }
+        { Bit[Vec<u8>]               => Bytes[Vec<u8>]          | conversion none }
     }
 );
 
 impl<'py, P> TypeConversion<NaiveDate, DateTime<Utc>> for MysqlPandasTransport<'py, P> {
     fn convert(val: NaiveDate) -> DateTime<Utc> {
-        DateTime::from_utc(val.and_hms(0, 0, 0), Utc)
+        DateTime::from_naive_utc_and_offset(
+            val.and_hms_opt(0, 0, 0)
+                .unwrap_or_else(|| panic!("and_hms_opt got None from {:?}", val)),
+            Utc,
+        )
     }
 }
 
@@ -97,7 +104,7 @@ impl<'py, P> TypeConversion<NaiveTime, String> for MysqlPandasTransport<'py, P> 
 
 impl<'py, P> TypeConversion<NaiveDateTime, DateTime<Utc>> for MysqlPandasTransport<'py, P> {
     fn convert(val: NaiveDateTime) -> DateTime<Utc> {
-        DateTime::from_utc(val, Utc)
+        DateTime::from_naive_utc_and_offset(val, Utc)
     }
 }
 

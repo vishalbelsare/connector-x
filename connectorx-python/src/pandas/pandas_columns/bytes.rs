@@ -1,10 +1,13 @@
-use super::{check_dtype, HasPandasColumn, PandasColumn, PandasColumnObject, GIL_MUTEX};
+use super::{
+    check_dtype, ExtractBlockFromBound, HasPandasColumn, PandasColumn, PandasColumnObject,
+    GIL_MUTEX,
+};
 use crate::errors::ConnectorXPythonError;
 use anyhow::anyhow;
 use fehler::throws;
 use ndarray::{ArrayViewMut2, Axis, Ix2};
-use numpy::{npyffi::NPY_TYPES, Element, PyArray, PyArrayDescr};
-use pyo3::{FromPyObject, Py, PyAny, PyResult, Python};
+use numpy::{Element, PyArray, PyArrayDescr, PyArrayMethods};
+use pyo3::{types::PyAnyMethods, Bound, Py, PyAny, PyResult, Python};
 use std::any::TypeId;
 
 #[derive(Clone)]
@@ -12,10 +15,14 @@ use std::any::TypeId;
 pub struct PyBytes(Py<pyo3::types::PyBytes>);
 
 // In order to put it into a numpy array
-impl Element for PyBytes {
-    const DATA_TYPE: numpy::DataType = numpy::DataType::Object;
-    fn is_same_type(dtype: &PyArrayDescr) -> bool {
-        unsafe { *dtype.as_dtype_ptr() }.type_num == NPY_TYPES::NPY_OBJECT as i32
+unsafe impl Element for PyBytes {
+    const IS_COPY: bool = false;
+    fn get_dtype_bound(py: Python<'_>) -> Bound<'_, PyArrayDescr> {
+        PyArrayDescr::object_bound(py)
+    }
+
+    fn clone_ref(&self, _py: Python<'_>) -> Self {
+        Self(self.0.clone())
     }
 }
 
@@ -24,8 +31,8 @@ pub struct BytesBlock<'a> {
     buf_size_mb: usize,
 }
 
-impl<'a> FromPyObject<'a> for BytesBlock<'a> {
-    fn extract(ob: &'a PyAny) -> PyResult<Self> {
+impl<'a> ExtractBlockFromBound<'a> for BytesBlock<'a> {
+    fn extract_block<'b: 'a>(ob: &'b pyo3::Bound<'a, PyAny>) -> PyResult<Self> {
         check_dtype(ob, "object")?;
         let array = ob.downcast::<PyArray<PyBytes, Ix2>>()?;
         let data = unsafe { array.as_array_mut() };
@@ -48,7 +55,7 @@ impl<'a> BytesBlock<'a> {
             view = rest;
             ret.push(BytesColumn {
                 data: col
-                    .into_shape(nrows)?
+                    .into_shape_with_order(nrows)?
                     .into_slice()
                     .ok_or_else(|| anyhow!("get None for splitted String data"))?
                     .as_mut_ptr(),
@@ -180,9 +187,7 @@ impl BytesColumn {
         let nstrings = self.bytes_lengths.len();
 
         if nstrings > 0 {
-            let py = unsafe { Python::assume_gil_acquired() };
-
-            {
+            Python::with_gil(|py| -> Result<(), ConnectorXPythonError> {
                 // allocation in python is not thread safe
                 let _guard = GIL_MUTEX
                     .lock()
@@ -193,19 +198,21 @@ impl BytesColumn {
                         let end = start + len;
                         unsafe {
                             // allocate and write in the same time
-                            *self.data.add(self.row_idx[i]) = PyBytes(
-                                pyo3::types::PyBytes::new(py, &self.bytes_buf[start..end]).into(),
-                            );
+                            let b =
+                                pyo3::types::PyBytes::new_bound(py, &self.bytes_buf[start..end])
+                                    .unbind();
+                            *self.data.add(self.row_idx[i]) = PyBytes(b);
                         };
                         start = end;
                     } else {
                         unsafe {
-                            let b = Py::from_owned_ptr(py, pyo3::ffi::Py_None());
+                            let b = Py::from_borrowed_ptr(py, pyo3::ffi::Py_None());
                             *self.data.add(self.row_idx[i]) = PyBytes(b);
                         }
                     }
                 }
-            }
+                Ok(())
+            })?;
 
             self.bytes_buf.truncate(0);
             self.bytes_lengths.truncate(0);

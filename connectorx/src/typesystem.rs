@@ -70,7 +70,11 @@ pub trait Transport {
     type TSD: TypeSystem;
     type S: Source;
     type D: Destination;
-    type Error: From<ConnectorXError> + Send;
+    type Error: From<ConnectorXError>
+        + From<<Self::S as Source>::Error>
+        + From<<Self::D as Destination>::Error>
+        + Send
+        + std::fmt::Debug;
 
     /// convert_typesystem convert the source type system TSS to the destination
     /// type system TSD.
@@ -93,7 +97,9 @@ pub trait Transport {
         ts2: Self::TSD,
         src: &'r mut <<Self::S as Source>::Partition as SourcePartition>::Parser<'s>,
         dst: &'r mut <Self::D as Destination>::Partition<'d>,
-    ) -> Result<(), Self::Error>;
+    ) -> Result<(), Self::Error>
+    where
+        Self: 'd;
 
     #[allow(clippy::type_complexity)]
     fn processor<'s, 'd>(
@@ -104,7 +110,9 @@ pub trait Transport {
             src: &mut <<Self::S as Source>::Partition as SourcePartition>::Parser<'s>,
             dst: &mut <Self::D as Destination>::Partition<'d>,
         ) -> Result<(), Self::Error>,
-    >;
+    >
+    where
+        Self: 'd;
 }
 
 #[doc(hidden)]

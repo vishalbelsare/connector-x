@@ -4,8 +4,9 @@ use crate::sources::oracle::OracleDialect;
 use fehler::{throw, throws};
 use log::{debug, trace, warn};
 use sqlparser::ast::{
-    BinaryOperator, Expr, Function, FunctionArg, Ident, ObjectName, Query, Select, SelectItem,
-    SetExpr, Statement, TableAlias, TableFactor, TableWithJoins, Value,
+    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, Ident, ObjectName, Query, Select,
+    SelectItem, SetExpr, Statement, TableAlias, TableFactor, TableWithJoins, Value,
+    WildcardAdditionalOptions,
 };
 use sqlparser::dialect::Dialect;
 use sqlparser::parser::Parser;
@@ -118,8 +119,9 @@ fn wrap_query(
     };
     Statement::Query(Box::new(Query {
         with,
-        body: SetExpr::Select(Box::new(Select {
-            distinct: false,
+        locks: vec![],
+        body: Box::new(SetExpr::Select(Box::new(Select {
+            distinct: None,
             top: None,
             projection,
             from: vec![TableWithJoins {
@@ -137,7 +139,10 @@ fn wrap_query(
             distribute_by: vec![],
             sort_by: vec![],
             having: None,
-        })),
+            into: None,
+            named_window: vec![],
+            qualify: None,
+        }))),
         order_by: vec![],
         limit: None,
         offset: None,
@@ -164,7 +169,7 @@ trait QueryExt {
 
 impl QueryExt for Query {
     fn as_select_mut(&mut self) -> Option<&mut Select> {
-        match self.body {
+        match *self.body {
             SetExpr::Select(ref mut select) => Some(select),
             _ => None,
         }
@@ -183,7 +188,12 @@ pub fn count_query<T: Dialect>(sql: &CXQuery<String>, dialect: &T) -> CXQuery<St
     // HACK: Some dialect (e.g. Oracle) does not support "AS" for alias
     #[cfg(feature = "src_oracle")]
     if dialect.type_id() == (OracleDialect {}.type_id()) {
-        table_alias = "";
+        // table_alias = "";
+        return CXQuery::Wrapped(format!(
+            "SELECT COUNT(*) FROM ({}) {}",
+            sql.as_str(),
+            COUNT_TMP_TAB_NAME
+        ));
     }
 
     let tsql = match sql.map(|sql| Parser::parse_sql(dialect, sql)).result() {
@@ -193,9 +203,11 @@ pub fn count_query<T: Dialect>(sql: &CXQuery<String>, dialect: &T) -> CXQuery<St
                     value: "count".to_string(),
                     quote_style: None,
                 }]),
-                args: vec![FunctionArg::Unnamed(Expr::Wildcard)],
+                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Wildcard)],
                 over: None,
                 distinct: false,
+                order_by: vec![],
+                special: false,
             }))];
             let ast_count: Statement = match ast {
                 CXQuery::Naked(ast) => {
@@ -206,7 +218,9 @@ pub fn count_query<T: Dialect>(sql: &CXQuery<String>, dialect: &T) -> CXQuery<St
                         .as_query()
                         .ok_or_else(|| ConnectorXError::SqlQueryNotSupported(sql.to_string()))?
                         .clone();
-                    query.order_by = vec![];
+                    if query.offset.is_none() {
+                        query.order_by = vec![]; // mssql offset must appear with order by
+                    }
                     let select = query
                         .as_select_mut()
                         .ok_or_else(|| ConnectorXError::SqlQueryNotSupported(sql.to_string()))?;
@@ -278,29 +292,31 @@ pub fn limit1_query<T: Dialect>(sql: &CXQuery<String>, dialect: &T) -> CXQuery<S
 pub fn limit1_query_oracle(sql: &CXQuery<String>) -> CXQuery<String> {
     trace!("Incoming oracle query: {}", sql);
 
-    let ast = Parser::parse_sql(&OracleDialect {}, sql.as_str())?;
-    if ast.len() != 1 {
-        throw!(ConnectorXError::SqlQueryNotSupported(sql.to_string()));
-    }
-    let ast_part: Statement;
-    let mut query = ast[0]
-        .as_query()
-        .ok_or_else(|| ConnectorXError::SqlQueryNotSupported(sql.to_string()))?
-        .clone();
+    CXQuery::Wrapped(format!("SELECT * FROM ({}) WHERE rownum = 1", sql))
 
-    let selection = Expr::BinaryOp {
-        left: Box::new(Expr::CompoundIdentifier(vec![Ident {
-            value: "rownum".to_string(),
-            quote_style: None,
-        }])),
-        op: BinaryOperator::Eq,
-        right: Box::new(Expr::Value(Value::Number("1".to_string(), false))),
-    };
-    ast_part = wrap_query(&mut query, vec![SelectItem::Wildcard], Some(selection), "");
+    // let ast = Parser::parse_sql(&OracleDialect {}, sql.as_str())?;
+    // if ast.len() != 1 {
+    //     throw!(ConnectorXError::SqlQueryNotSupported(sql.to_string()));
+    // }
+    // let ast_part: Statement;
+    // let mut query = ast[0]
+    //     .as_query()
+    //     .ok_or_else(|| ConnectorXError::SqlQueryNotSupported(sql.to_string()))?
+    //     .clone();
 
-    let tsql = format!("{}", ast_part);
-    debug!("Transformed limit 1 query: {}", tsql);
-    CXQuery::Wrapped(tsql)
+    // let selection = Expr::BinaryOp {
+    //     left: Box::new(Expr::CompoundIdentifier(vec![Ident {
+    //         value: "rownum".to_string(),
+    //         quote_style: None,
+    //     }])),
+    //     op: BinaryOperator::Eq,
+    //     right: Box::new(Expr::Value(Value::Number("1".to_string(), false))),
+    // };
+    // ast_part = wrap_query(&mut query, vec![SelectItem::Wildcard], Some(selection), "");
+
+    // let tsql = format!("{}", ast_part);
+    // debug!("Transformed limit 1 query: {}", tsql);
+    // CXQuery::Wrapped(tsql)
 }
 
 #[throws(ConnectorXError)]
@@ -331,11 +347,12 @@ pub fn single_col_partition_query<T: Dialect>(
     // HACK: Some dialect (e.g. Oracle) does not support "AS" for alias
     #[cfg(feature = "src_oracle")]
     if dialect.type_id() == (OracleDialect {}.type_id()) {
-        table_alias = "";
-        cid = Box::new(Expr::Identifier(Ident {
-            value: col.to_string(),
-            quote_style: None,
-        }));
+        return format!("SELECT * FROM ({}) CXTMPTAB_PART WHERE CXTMPTAB_PART.{} >= {} AND CXTMPTAB_PART.{} < {}", sql, col, lower, col, upper);
+        // table_alias = "";
+        // cid = Box::new(Expr::Identifier(Ident {
+        //     value: col.to_string(),
+        //     quote_style: None,
+        // }));
     }
 
     let tsql = match Parser::parse_sql(dialect, sql) {
@@ -383,7 +400,7 @@ pub fn single_col_partition_query<T: Dialect>(
 
             ast_part = wrap_query(
                 &mut query,
-                vec![SelectItem::Wildcard],
+                vec![SelectItem::Wildcard(WildcardAdditionalOptions::default())],
                 Some(selection),
                 table_alias,
             );
@@ -407,25 +424,31 @@ pub fn get_partition_range_query<T: Dialect>(sql: &str, col: &str, dialect: &T) 
     #[allow(unused_mut)]
     let mut table_alias = RANGE_TMP_TAB_NAME;
     #[allow(unused_mut)]
-    let mut args = vec![FunctionArg::Unnamed(Expr::CompoundIdentifier(vec![
-        Ident {
-            value: RANGE_TMP_TAB_NAME.to_string(),
-            quote_style: None,
-        },
-        Ident {
-            value: col.to_string(),
-            quote_style: None,
-        },
-    ]))];
+    let mut args = vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
+        Expr::CompoundIdentifier(vec![
+            Ident {
+                value: RANGE_TMP_TAB_NAME.to_string(),
+                quote_style: None,
+            },
+            Ident {
+                value: col.to_string(),
+                quote_style: None,
+            },
+        ]),
+    ))];
 
     // HACK: Some dialect (e.g. Oracle) does not support "AS" for alias
     #[cfg(feature = "src_oracle")]
     if dialect.type_id() == (OracleDialect {}.type_id()) {
-        table_alias = "";
-        args = vec![FunctionArg::Unnamed(Expr::Identifier(Ident {
-            value: col.to_string(),
-            quote_style: None,
-        }))];
+        return format!(
+            "SELECT MIN({}.{}) as min, MAX({}.{}) as max FROM ({}) {}",
+            RANGE_TMP_TAB_NAME, col, RANGE_TMP_TAB_NAME, col, sql, RANGE_TMP_TAB_NAME
+        );
+        // table_alias = "";
+        // args = vec![FunctionArg::Unnamed(Expr::Identifier(Ident {
+        //     value: col.to_string(),
+        //     quote_style: None,
+        // }))];
     }
 
     let tsql = match Parser::parse_sql(dialect, sql) {
@@ -439,7 +462,10 @@ pub fn get_partition_range_query<T: Dialect>(sql: &str, col: &str, dialect: &T) 
                 .ok_or_else(|| ConnectorXError::SqlQueryNotSupported(sql.to_string()))?
                 .clone();
             let ast_range: Statement;
-            query.order_by = vec![];
+
+            if query.limit.is_none() && query.offset.is_none() {
+                query.order_by = vec![]; // only omit orderby when there is no limit and offset in the query
+            }
             let projection = vec![
                 SelectItem::UnnamedExpr(Expr::Function(Function {
                     name: ObjectName(vec![Ident {
@@ -449,6 +475,8 @@ pub fn get_partition_range_query<T: Dialect>(sql: &str, col: &str, dialect: &T) 
                     args: args.clone(),
                     over: None,
                     distinct: false,
+                    order_by: vec![],
+                    special: false,
                 })),
                 SelectItem::UnnamedExpr(Expr::Function(Function {
                     name: ObjectName(vec![Ident {
@@ -458,6 +486,8 @@ pub fn get_partition_range_query<T: Dialect>(sql: &str, col: &str, dialect: &T) 
                     args,
                     over: None,
                     distinct: false,
+                    order_by: vec![],
+                    special: false,
                 })),
             ];
             ast_range = wrap_query(&mut query, projection, None, table_alias);
@@ -505,36 +535,44 @@ pub fn get_partition_range_query_sep<T: Dialect>(
                     value: "min".to_string(),
                     quote_style: None,
                 }]),
-                args: vec![FunctionArg::Unnamed(Expr::CompoundIdentifier(vec![
-                    Ident {
-                        value: RANGE_TMP_TAB_NAME.to_string(),
-                        quote_style: None,
-                    },
-                    Ident {
-                        value: col.to_string(),
-                        quote_style: None,
-                    },
-                ]))],
+                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
+                    Expr::CompoundIdentifier(vec![
+                        Ident {
+                            value: RANGE_TMP_TAB_NAME.to_string(),
+                            quote_style: None,
+                        },
+                        Ident {
+                            value: col.to_string(),
+                            quote_style: None,
+                        },
+                    ]),
+                ))],
                 over: None,
                 distinct: false,
+                order_by: vec![],
+                special: false,
             }))];
             let max_proj = vec![SelectItem::UnnamedExpr(Expr::Function(Function {
                 name: ObjectName(vec![Ident {
                     value: "max".to_string(),
                     quote_style: None,
                 }]),
-                args: vec![FunctionArg::Unnamed(Expr::CompoundIdentifier(vec![
-                    Ident {
-                        value: RANGE_TMP_TAB_NAME.into(),
-                        quote_style: None,
-                    },
-                    Ident {
-                        value: col.into(),
-                        quote_style: None,
-                    },
-                ]))],
+                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
+                    Expr::CompoundIdentifier(vec![
+                        Ident {
+                            value: RANGE_TMP_TAB_NAME.into(),
+                            quote_style: None,
+                        },
+                        Ident {
+                            value: col.into(),
+                            quote_style: None,
+                        },
+                    ]),
+                ))],
                 over: None,
                 distinct: false,
+                order_by: vec![],
+                special: false,
             }))];
             ast_range_min = wrap_query(&mut query.clone(), min_proj, None, RANGE_TMP_TAB_NAME);
             ast_range_max = wrap_query(&mut query, max_proj, None, RANGE_TMP_TAB_NAME);

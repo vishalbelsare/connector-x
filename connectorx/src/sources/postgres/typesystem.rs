@@ -17,9 +17,12 @@ pub enum PostgresTypeSystem {
     Float4Array(bool),
     Float8Array(bool),
     NumericArray(bool),
+    BoolArray(bool),
     Int2Array(bool),
     Int4Array(bool),
     Int8Array(bool),
+    VarcharArray(bool),
+    TextArray(bool),
     Date(bool),
     Char(bool),
     BpChar(bool),
@@ -34,6 +37,7 @@ pub enum PostgresTypeSystem {
     JSONB(bool),
     Enum(bool),
     HSTORE(bool),
+    Name(bool),
 }
 
 impl_typesystem! {
@@ -45,15 +49,17 @@ impl_typesystem! {
         { Float4 => f32 }
         { Float8 => f64 }
         { Numeric => Decimal }
-        { Int2Array => Vec<i16> }
-        { Int4Array => Vec<i32> }
-        { Int8Array => Vec<i64> }
-        { Float4Array => Vec<f32> }
-        { Float8Array => Vec<f64> }
-        { NumericArray => Vec<Decimal> }
+        { BoolArray => Vec<Option<bool>> }
+        { Int2Array => Vec<Option<i16>> }
+        { Int4Array => Vec<Option<i32>> }
+        { Int8Array => Vec<Option<i64>> }
+        { Float4Array => Vec<Option<f32>> }
+        { Float8Array => Vec<Option<f64>> }
+        { NumericArray => Vec<Option<Decimal>> }
+        { VarcharArray | TextArray => Vec<Option<String>>}
         { Bool => bool }
         { Char => i8 }
-        { Text | BpChar | VarChar | Enum => &'r str }
+        { Text | BpChar | VarChar | Enum | Name => &'r str }
         { ByteA => Vec<u8> }
         { Time => NaiveTime }
         { Timestamp => NaiveDateTime }
@@ -75,15 +81,18 @@ impl<'a> From<&'a Type> for PostgresTypeSystem {
             "float4" => Float4(true),
             "float8" => Float8(true),
             "numeric" => Numeric(true),
+            "_bool" => BoolArray(true),
             "_int2" => Int2Array(true),
             "_int4" => Int4Array(true),
             "_int8" => Int8Array(true),
             "_float4" => Float4Array(true),
             "_float8" => Float8Array(true),
             "_numeric" => NumericArray(true),
+            "_varchar" => VarcharArray(true),
+            "_text" => TextArray(true),
             "bool" => Bool(true),
             "char" => Char(true),
-            "text" => Text(true),
+            "text" | "citext" | "ltree" | "lquery" | "ltxtquery" | "name" => Text(true),
             "bpchar" => BpChar(true),
             "varchar" => VarChar(true),
             "bytea" => ByteA(true),
@@ -103,38 +112,16 @@ impl<'a> From<&'a Type> for PostgresTypeSystem {
     }
 }
 
-// Link PostgresDTypes back to the one defiend by the postgres crate.
-impl<'a> From<PostgresTypeSystem> for Type {
-    fn from(ty: PostgresTypeSystem) -> Type {
+pub struct PostgresTypePairs<'a>(pub &'a Type, pub &'a PostgresTypeSystem);
+
+// Link (postgres::Type, connectorx::PostgresTypes) back to the one defiend by the postgres crate.
+impl From<PostgresTypePairs<'_>> for Type {
+    fn from(ty: PostgresTypePairs) -> Type {
         use PostgresTypeSystem::*;
-        match ty {
-            Int2(_) => Type::INT2,
-            Int4(_) => Type::INT4,
-            Int8(_) => Type::INT8,
-            Float4(_) => Type::FLOAT4,
-            Float8(_) => Type::FLOAT8,
-            Numeric(_) => Type::NUMERIC,
-            Int2Array(_) => Type::INT2_ARRAY,
-            Int4Array(_) => Type::INT4_ARRAY,
-            Int8Array(_) => Type::INT8_ARRAY,
-            Float4Array(_) => Type::FLOAT4_ARRAY,
-            Float8Array(_) => Type::FLOAT8_ARRAY,
-            NumericArray(_) => Type::NUMERIC_ARRAY,
-            Bool(_) => Type::BOOL,
-            Text(_) => Type::TEXT,
-            BpChar(_) => Type::BPCHAR,
-            VarChar(_) => Type::VARCHAR,
-            Char(_) => Type::CHAR,
-            ByteA(_) => Type::BYTEA,
-            Date(_) => Type::DATE,
-            Time(_) => Type::TIME,
-            Timestamp(_) => Type::TIMESTAMP,
-            TimestampTz(_) => Type::TIMESTAMPTZ,
-            UUID(_) => Type::UUID,
-            JSON(_) => Type::JSON,
-            JSONB(_) => Type::JSONB,
+        match ty.1 {
             Enum(_) => Type::TEXT,
             HSTORE(_) => Type::TEXT, // hstore is not supported in binary protocol (since no corresponding inner TYPE)
+            _ => ty.0.clone(),
         }
     }
 }

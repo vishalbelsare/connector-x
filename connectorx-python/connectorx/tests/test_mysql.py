@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
-from .. import read_sql
+from .. import read_sql, ConnectionUrl
 
 
 @pytest.fixture(scope="module")  # type: ignore
@@ -337,6 +337,9 @@ def test_mysql_types_binary(mysql_url: str) -> None:
             "test_mediumtext": pd.Series(
                 [None, b"", b"medium text!!!!"], dtype="object"
             ),
+            "test_bit": pd.Series(
+                [b'\x17', b'\x18', None]
+            ),
         },
     )
     assert_frame_equal(df, expected, check_names=True)
@@ -406,6 +409,9 @@ def test_mysql_types_text(mysql_url: str) -> None:
             "test_mediumtext": pd.Series(
                 [None, b"", b"medium text!!!!"], dtype="object"
             ),
+            "test_bit": pd.Series(
+                [b'\x17', b'\x18', None]
+            ),
         },
     )
     assert_frame_equal(df, expected, check_names=True)
@@ -468,3 +474,56 @@ def test_mysql_cte(mysql_url: str) -> None:
         },
     )
     assert_frame_equal(df, expected, check_names=True)
+
+
+def test_connection_url(mysql_url: str) -> None:
+    test_mysql_cte(ConnectionUrl(mysql_url))
+
+def test_mysql_single_pre_execution_queries(mysql_url: str) -> None:
+    pre_execution_query = "SET SESSION max_execution_time = 2151"
+    query = "SELECT @@SESSION.max_execution_time AS max_execution_time"
+    df = read_sql(mysql_url, query, pre_execution_query=pre_execution_query)
+    expected = pd.DataFrame(
+        index=range(1),
+        data={
+            "max_execution_time": pd.Series([2151], dtype="float64")
+        },
+    )
+    assert_frame_equal(df, expected, check_names=True)
+
+
+def test_mysql_multiple_pre_execution_queries(mysql_url: str) -> None:
+    pre_execution_query = [
+        "SET SESSION max_execution_time = 2151",
+        "SET SESSION wait_timeout = 2252",
+    ]
+    query = "SELECT @@SESSION.max_execution_time AS max_execution_time, @@SESSION.wait_timeout AS wait_timeout"
+    df = read_sql(mysql_url, query, pre_execution_query=pre_execution_query)
+    expected = pd.DataFrame(
+        index=range(1),
+        data={
+            "max_execution_time": pd.Series([2151], dtype="float64"),
+            "wait_timeout": pd.Series([2252], dtype="float64")
+        },
+    )
+    assert_frame_equal(df, expected, check_names=True)
+
+def test_mysql_partitioned_pre_execution_queries(mysql_url: str) -> None:
+    pre_execution_query = [
+        "SET SESSION max_execution_time = 2151",
+        "SET SESSION wait_timeout = 2252",
+    ]
+    query = [
+        'SELECT "max_execution_time" AS name, @@SESSION.max_execution_time AS setting',
+        'SELECT "wait_timeout" AS name, @@SESSION.wait_timeout AS setting'
+    ]
+    df = read_sql(mysql_url, query, pre_execution_query=pre_execution_query).sort_values(by=['name']).reset_index(drop=True)
+    expected = pd.DataFrame(
+        index=range(2),
+        data={
+            "name": pd.Series(["max_execution_time", "wait_timeout"], dtype="str"),
+            "setting": pd.Series([2151, 2252], dtype="float64"),
+        },
+    ).sort_values(by=['name']).reset_index(drop=True)
+    
+    assert_frame_equal(df, expected, check_like=False)

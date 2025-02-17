@@ -22,6 +22,15 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(feature = "dst_polars")]
+use {
+    arrow::ffi::to_ffi,
+    polars::prelude::{concat, DataFrame, IntoLazy, PlSmallStr, Series, UnionArgs},
+    polars_arrow::ffi::{import_array_from_c, import_field_from_c},
+    std::iter::FromIterator,
+    std::mem::transmute,
+};
+
 type Builder = Box<dyn Any + Send>;
 type Builders = Vec<Builder>;
 
@@ -30,6 +39,7 @@ pub struct ArrowDestination {
     names: Vec<String>,
     data: Arc<Mutex<Vec<RecordBatch>>>,
     arrow_schema: Arc<Schema>,
+    batch_size: usize,
 }
 
 impl Default for ArrowDestination {
@@ -39,6 +49,7 @@ impl Default for ArrowDestination {
             names: vec![],
             data: Arc::new(Mutex::new(vec![])),
             arrow_schema: Arc::new(Schema::empty()),
+            batch_size: RECORD_BATCH_SIZE,
         }
     }
 }
@@ -46,6 +57,16 @@ impl Default for ArrowDestination {
 impl ArrowDestination {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn new_with_batch_size(batch_size: usize) -> Self {
+        ArrowDestination {
+            schema: vec![],
+            names: vec![],
+            data: Arc::new(Mutex::new(vec![])),
+            arrow_schema: Arc::new(Schema::empty()),
+            batch_size,
+        }
     }
 }
 
@@ -94,6 +115,7 @@ impl Destination for ArrowDestination {
                 self.schema.clone(),
                 Arc::clone(&self.data),
                 Arc::clone(&self.arrow_schema),
+                self.batch_size,
             )?);
         }
         partitions
@@ -111,6 +133,82 @@ impl ArrowDestination {
         lock.into_inner()
             .map_err(|e| anyhow!("mutex poisoned {}", e))?
     }
+
+    #[cfg(feature = "dst_polars")]
+    #[throws(ArrowDestinationError)]
+    pub fn polars(self) -> DataFrame {
+        // Convert to arrow first
+        let rbs = self.arrow()?;
+
+        // Ready LazyFrame vector for the chunks
+        let mut lf_vec = vec![];
+
+        for chunk in rbs.into_iter() {
+            // Column vector
+            let mut columns = Vec::with_capacity(chunk.num_columns());
+
+            // Arrow stores data by columns, therefore need to be Zero-copied by column
+            for (i, col) in chunk.columns().iter().enumerate() {
+                // Convert to ArrayData (arrow-rs)
+                let array = col.to_data();
+
+                // Convert to ffi with arrow-rs
+                let (out_array, out_schema) = to_ffi(&array).unwrap();
+
+                // Import field from ffi with polars
+                let field = unsafe {
+                    import_field_from_c(transmute::<
+                        &arrow::ffi::FFI_ArrowSchema,
+                        &polars_arrow::ffi::ArrowSchema,
+                    >(&out_schema))
+                }?;
+
+                // Import data from ffi with polars
+                let data = unsafe {
+                    import_array_from_c(
+                        transmute::<arrow::ffi::FFI_ArrowArray, polars_arrow::ffi::ArrowArray>(
+                            out_array,
+                        ),
+                        field.dtype().clone(),
+                    )
+                }?;
+
+                // Create Polars series from arrow column
+                columns.push(Series::from_arrow(
+                    PlSmallStr::from(chunk.schema().field(i).name()),
+                    data,
+                )?);
+            }
+
+            // Create DataFrame from the columns
+            lf_vec.push(DataFrame::from_iter(columns).lazy());
+        }
+
+        // Concat the chunks
+        let union_args = UnionArgs::default();
+        concat(lf_vec, union_args)?.collect()?
+    }
+
+    #[throws(ArrowDestinationError)]
+    pub fn record_batch(&mut self) -> Option<RecordBatch> {
+        let mut guard = self
+            .data
+            .lock()
+            .map_err(|e| anyhow!("mutex poisoned {}", e))?;
+        (*guard).pop()
+    }
+
+    pub fn empty_batch(&self) -> RecordBatch {
+        RecordBatch::new_empty(self.arrow_schema.clone())
+    }
+
+    pub fn arrow_schema(&self) -> Arc<Schema> {
+        self.arrow_schema.clone()
+    }
+
+    pub fn names(&self) -> &[String] {
+        self.names.as_slice()
+    }
 }
 
 pub struct ArrowPartitionWriter {
@@ -120,7 +218,10 @@ pub struct ArrowPartitionWriter {
     current_col: usize,
     data: Arc<Mutex<Vec<RecordBatch>>>,
     arrow_schema: Arc<Schema>,
+    batch_size: usize,
 }
+
+// unsafe impl Sync for ArrowPartitionWriter {}
 
 impl ArrowPartitionWriter {
     #[throws(ArrowDestinationError)]
@@ -128,6 +229,7 @@ impl ArrowPartitionWriter {
         schema: Vec<ArrowTypeSystem>,
         data: Arc<Mutex<Vec<RecordBatch>>>,
         arrow_schema: Arc<Schema>,
+        batch_size: usize,
     ) -> Self {
         let mut pw = ArrowPartitionWriter {
             schema,
@@ -136,6 +238,7 @@ impl ArrowPartitionWriter {
             current_col: 0,
             data,
             arrow_schema,
+            batch_size,
         };
         pw.allocate()?;
         pw
@@ -146,7 +249,7 @@ impl ArrowPartitionWriter {
         let builders = self
             .schema
             .iter()
-            .map(|dt| Ok(Realize::<FNewBuilder>::realize(*dt)?(RECORD_BATCH_SIZE)))
+            .map(|dt| Ok(Realize::<FNewBuilder>::realize(*dt)?(self.batch_size)))
             .collect::<Result<Vec<_>>>()?;
         self.builders.replace(builders);
     }
@@ -210,22 +313,25 @@ where
         self.current_col = (self.current_col + 1) % self.ncols();
         self.schema[col].check::<T>()?;
 
-        match &mut self.builders {
-            Some(builders) => {
-                <T as ArrowAssoc>::append(
-                    builders[col]
-                        .downcast_mut::<T::Builder>()
-                        .ok_or_else(|| anyhow!("cannot cast arrow builder for append"))?,
-                    value,
-                )?;
+        loop {
+            match &mut self.builders {
+                Some(builders) => {
+                    <T as ArrowAssoc>::append(
+                        builders[col]
+                            .downcast_mut::<T::Builder>()
+                            .ok_or_else(|| anyhow!("cannot cast arrow builder for append"))?,
+                        value,
+                    )?;
+                    break;
+                }
+                None => self.allocate()?, // allocate if builders are not initialized
             }
-            None => throw!(anyhow!("arrow arrays are empty!")),
         }
 
         // flush if exceed batch_size
         if self.current_col == 0 {
             self.current_row += 1;
-            if self.current_row >= RECORD_BATCH_SIZE {
+            if self.current_row >= self.batch_size {
                 self.flush()?;
                 self.allocate()?;
             }

@@ -9,15 +9,23 @@ use crate::{
     data_order::DataOrder,
     errors::ConnectorXError,
     sources::{PartitionParser, Produce, Source, SourcePartition},
-    sql::{count_query, CXQuery},
+    sql::{count_query, limit1_query, CXQuery},
 };
 use anyhow::anyhow;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use fehler::{throw, throws};
+use log::{debug, warn};
 use r2d2::{Pool, PooledConnection};
 use r2d2_mysql::{
-    mysql::{prelude::Queryable, Binary, Opts, OptsBuilder, QueryResult, Row, Text},
-    MysqlConnectionManager,
+    mysql::{
+        consts::{
+            ColumnFlags as MySQLColumnFlags, ColumnType as MySQLColumnType, UTF8MB4_GENERAL_CI,
+            UTF8_GENERAL_CI,
+        },
+        prelude::Queryable,
+        Binary, Opts, OptsBuilder, QueryResult, Row, Text,
+    },
+    MySqlConnectionManager,
 };
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -25,8 +33,7 @@ use sqlparser::dialect::MySqlDialect;
 use std::marker::PhantomData;
 pub use typesystem::MySQLTypeSystem;
 
-type MysqlManager = MysqlConnectionManager;
-type MysqlConn = PooledConnection<MysqlManager>;
+type MysqlConn = PooledConnection<MySqlConnectionManager>;
 
 pub enum BinaryProtocol {}
 pub enum TextProtocol {}
@@ -38,18 +45,19 @@ fn get_total_rows(conn: &mut MysqlConn, query: &CXQuery<String>) -> usize {
 }
 
 pub struct MySQLSource<P> {
-    pool: Pool<MysqlManager>,
+    pool: Pool<MySqlConnectionManager>,
     origin_query: Option<String>,
     queries: Vec<CXQuery<String>>,
     names: Vec<String>,
     schema: Vec<MySQLTypeSystem>,
+    pre_execution_queries: Option<Vec<String>>,
     _protocol: PhantomData<P>,
 }
 
 impl<P> MySQLSource<P> {
     #[throws(MySQLSourceError)]
     pub fn new(conn: &str, nconn: usize) -> Self {
-        let manager = MysqlConnectionManager::new(OptsBuilder::from_opts(Opts::from_url(conn)?));
+        let manager = MySqlConnectionManager::new(OptsBuilder::from_opts(Opts::from_url(conn)?));
         let pool = r2d2::Pool::builder()
             .max_size(nconn as u32)
             .build(manager)?;
@@ -60,6 +68,7 @@ impl<P> MySQLSource<P> {
             queries: vec![],
             names: vec![],
             schema: vec![],
+            pre_execution_queries: None,
             _protocol: PhantomData,
         }
     }
@@ -91,26 +100,104 @@ where
         self.origin_query = query;
     }
 
+    fn set_pre_execution_queries(&mut self, pre_execution_queries: Option<&[String]>) {
+        self.pre_execution_queries = pre_execution_queries.map(|s| s.to_vec());
+    }
+
     #[throws(MySQLSourceError)]
     fn fetch_metadata(&mut self) {
         assert!(!self.queries.is_empty());
 
         let mut conn = self.pool.get()?;
+        let server_version_post_5_5_3 = conn.server_version() >= (5, 5, 3);
+
         let first_query = &self.queries[0];
 
-        let stmt = conn.prep(&*first_query)?;
-        let (names, types) = stmt
-            .columns()
-            .iter()
-            .map(|col| {
-                (
-                    col.name_str().to_string(),
-                    MySQLTypeSystem::from((&col.column_type(), &col.flags())),
-                )
-            })
-            .unzip();
-        self.names = names;
-        self.schema = types;
+        match conn.prep(first_query) {
+            Ok(stmt) => {
+                let (names, types) = stmt
+                    .columns()
+                    .iter()
+                    .map(|col| {
+                        let col_name = col.name_str().to_string();
+                        let col_type = col.column_type();
+                        let col_flags = col.flags();
+                        let charset = col.character_set();
+                        let charset_is_utf8 = (server_version_post_5_5_3
+                            && charset == UTF8MB4_GENERAL_CI)
+                            || (!server_version_post_5_5_3 && charset == UTF8_GENERAL_CI);
+                        if charset_is_utf8
+                            && (col_type == MySQLColumnType::MYSQL_TYPE_LONG_BLOB
+                                || col_type == MySQLColumnType::MYSQL_TYPE_BLOB
+                                || col_type == MySQLColumnType::MYSQL_TYPE_MEDIUM_BLOB
+                                || col_type == MySQLColumnType::MYSQL_TYPE_TINY_BLOB)
+                        {
+                            return (
+                                col_name,
+                                MySQLTypeSystem::Char(
+                                    !col_flags.contains(MySQLColumnFlags::NOT_NULL_FLAG),
+                                ),
+                            );
+                        }
+                        let d = MySQLTypeSystem::from((&col_type, &col_flags));
+                        (col_name, d)
+                    })
+                    .unzip();
+                self.names = names;
+                self.schema = types;
+            }
+            Err(e) => {
+                warn!(
+                    "mysql text prepared statement error: {:?}, switch to limit1 method",
+                    e
+                );
+                for (i, query) in self.queries.iter().enumerate() {
+                    // assuming all the partition queries yield same schema
+                    match conn
+                        .query_first::<Row, _>(limit1_query(query, &MySqlDialect {})?.as_str())
+                    {
+                        Ok(Some(row)) => {
+                            let (names, types) = row
+                                .columns_ref()
+                                .iter()
+                                .map(|col| {
+                                    (
+                                        col.name_str().to_string(),
+                                        MySQLTypeSystem::from((&col.column_type(), &col.flags())),
+                                    )
+                                })
+                                .unzip();
+                            self.names = names;
+                            self.schema = types;
+                            return;
+                        }
+                        Ok(None) => {}
+                        Err(e) if i == self.queries.len() - 1 => {
+                            // tried the last query but still get an error
+                            debug!("cannot get metadata for '{}', try next query: {}", query, e);
+                            throw!(e)
+                        }
+                        Err(_) => {}
+                    }
+                }
+
+                // tried all queries but all get empty result set
+                let iter = conn.query_iter(self.queries[0].as_str())?;
+                let (names, types) = iter
+                    .columns()
+                    .as_ref()
+                    .iter()
+                    .map(|col| {
+                        (
+                            col.name_str().to_string(),
+                            MySQLTypeSystem::VarChar(false), // set all columns as string (align with pandas)
+                        )
+                    })
+                    .unzip();
+                self.names = names;
+                self.schema = types;
+            }
+        }
     }
 
     #[throws(MySQLSourceError)]
@@ -138,7 +225,14 @@ where
     fn partition(self) -> Vec<Self::Partition> {
         let mut ret = vec![];
         for query in self.queries {
-            let conn = self.pool.get()?;
+            let mut conn = self.pool.get()?;
+
+            if let Some(pre_queries) = &self.pre_execution_queries {
+                for pre_query in pre_queries {
+                    conn.query_drop(pre_query)?;
+                }
+            }
+
             ret.push(MySQLSourcePartition::new(conn, &query, &self.schema));
         }
         ret
@@ -225,6 +319,7 @@ pub struct MySQLBinarySourceParser<'a> {
     ncols: usize,
     current_col: usize,
     current_row: usize,
+    is_finished: bool,
 }
 
 impl<'a> MySQLBinarySourceParser<'a> {
@@ -235,6 +330,7 @@ impl<'a> MySQLBinarySourceParser<'a> {
             ncols: schema.len(),
             current_row: 0,
             current_col: 0,
+            is_finished: false,
         }
     }
 
@@ -253,6 +349,14 @@ impl<'a> PartitionParser<'a> for MySQLBinarySourceParser<'a> {
 
     #[throws(MySQLSourceError)]
     fn fetch_next(&mut self) -> (usize, bool) {
+        assert!(self.current_col == 0);
+        let remaining_rows = self.rowbuf.len() - self.current_row;
+        if remaining_rows > 0 {
+            return (remaining_rows, self.is_finished);
+        } else if self.is_finished {
+            return (0, self.is_finished);
+        }
+
         if !self.rowbuf.is_empty() {
             self.rowbuf.drain(..);
         }
@@ -261,13 +365,14 @@ impl<'a> PartitionParser<'a> for MySQLBinarySourceParser<'a> {
             if let Some(item) = self.iter.next() {
                 self.rowbuf.push(item?);
             } else {
+                self.is_finished = true;
                 break;
             }
         }
         self.current_row = 0;
         self.current_col = 0;
 
-        (self.rowbuf.len(), self.rowbuf.len() < DB_BUFFER_SIZE)
+        (self.rowbuf.len(), self.is_finished)
     }
 }
 
@@ -325,6 +430,7 @@ pub struct MySQLTextSourceParser<'a> {
     ncols: usize,
     current_col: usize,
     current_row: usize,
+    is_finished: bool,
 }
 
 impl<'a> MySQLTextSourceParser<'a> {
@@ -335,6 +441,7 @@ impl<'a> MySQLTextSourceParser<'a> {
             ncols: schema.len(),
             current_row: 0,
             current_col: 0,
+            is_finished: false,
         }
     }
 
@@ -353,6 +460,14 @@ impl<'a> PartitionParser<'a> for MySQLTextSourceParser<'a> {
 
     #[throws(MySQLSourceError)]
     fn fetch_next(&mut self) -> (usize, bool) {
+        assert!(self.current_col == 0);
+        let remaining_rows = self.rowbuf.len() - self.current_row;
+        if remaining_rows > 0 {
+            return (remaining_rows, self.is_finished);
+        } else if self.is_finished {
+            return (0, self.is_finished);
+        }
+
         if !self.rowbuf.is_empty() {
             self.rowbuf.drain(..);
         }
@@ -360,12 +475,13 @@ impl<'a> PartitionParser<'a> for MySQLTextSourceParser<'a> {
             if let Some(item) = self.iter.next() {
                 self.rowbuf.push(item?);
             } else {
+                self.is_finished = true;
                 break;
             }
         }
         self.current_row = 0;
         self.current_col = 0;
-        (self.rowbuf.len(), self.rowbuf.len() < DB_BUFFER_SIZE)
+        (self.rowbuf.len(), self.is_finished)
     }
 }
 

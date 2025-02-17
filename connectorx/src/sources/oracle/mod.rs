@@ -1,27 +1,34 @@
 mod errors;
 mod typesystem;
 
+use std::collections::HashMap;
+
+pub use self::errors::OracleSourceError;
+pub use self::typesystem::OracleTypeSystem;
+use crate::constants::{DB_BUFFER_SIZE, ORACLE_ARRAY_SIZE};
 use crate::{
     data_order::DataOrder,
     errors::ConnectorXError,
     sources::{PartitionParser, Produce, Source, SourcePartition},
     sql::{count_query, limit1_query_oracle, CXQuery},
+    utils::DummyBox,
 };
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use fehler::{throw, throws};
 use log::debug;
+use owning_ref::OwningHandle;
 use r2d2::{Pool, PooledConnection};
-use r2d2_oracle::{oracle::Row, OracleConnectionManager};
+use r2d2_oracle::oracle::ResultSet;
+use r2d2_oracle::{
+    oracle::{Connector, Row, Statement},
+    OracleConnectionManager,
+};
+use sqlparser::dialect::Dialect;
 use url::Url;
+use urlencoding::decode;
+
 type OracleManager = OracleConnectionManager;
 type OracleConn = PooledConnection<OracleManager>;
-
-pub use self::errors::OracleSourceError;
-use crate::constants::DB_BUFFER_SIZE;
-use r2d2_oracle::oracle::ResultSet;
-use sqlparser::dialect::Dialect;
-pub use typesystem::OracleTypeSystem;
-use urlencoding::decode;
 
 #[derive(Debug)]
 pub struct OracleDialect {}
@@ -29,14 +36,11 @@ pub struct OracleDialect {}
 // implementation copy from AnsiDialect
 impl Dialect for OracleDialect {
     fn is_identifier_start(&self, ch: char) -> bool {
-        ('a'..='z').contains(&ch) || ('A'..='Z').contains(&ch)
+        ch.is_ascii_lowercase() || ch.is_ascii_uppercase()
     }
 
     fn is_identifier_part(&self, ch: char) -> bool {
-        ('a'..='z').contains(&ch)
-            || ('A'..='Z').contains(&ch)
-            || ('0'..='9').contains(&ch)
-            || ch == '_'
+        ch.is_ascii_lowercase() || ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_'
     }
 }
 
@@ -48,18 +52,36 @@ pub struct OracleSource {
     schema: Vec<OracleTypeSystem>,
 }
 
+#[throws(OracleSourceError)]
+pub fn connect_oracle(conn: &Url) -> Connector {
+    let user = decode(conn.username())?.into_owned();
+    let password = decode(conn.password().unwrap_or(""))?.into_owned();
+    let host = decode(conn.host_str().unwrap_or("localhost"))?.into_owned();
+
+    let params: HashMap<String, String> = conn.query_pairs().into_owned().collect();
+
+    let conn_str = if params.get("alias").map_or(false, |v| v == "true") {
+        host.clone()
+    } else {
+        let port = conn.port().unwrap_or(1521);
+        let path = decode(conn.path())?.into_owned();
+        format!("//{}:{}{}", host, port, path)
+    };
+
+    let mut connector = oracle::Connector::new(user.as_str(), password.as_str(), conn_str.as_str());
+    if user.is_empty() && password.is_empty() {
+        debug!("No username or password provided, assuming system auth.");
+        connector.external_auth(true);
+    }
+    connector
+}
+
 impl OracleSource {
     #[throws(OracleSourceError)]
     pub fn new(conn: &str, nconn: usize) -> Self {
         let conn = Url::parse(conn)?;
-        let user = decode(conn.username())?.into_owned();
-        let password = decode(conn.password().unwrap_or(""))?.into_owned();
-        let host = "//".to_owned()
-            + decode(conn.host_str().unwrap_or("localhost"))?
-                .into_owned()
-                .as_str()
-            + conn.path();
-        let manager = OracleConnectionManager::new(user.as_str(), password.as_str(), host.as_str());
+        let connector = connect_oracle(&conn)?;
+        let manager = OracleConnectionManager::from_connector(connector);
         let pool = r2d2::Pool::builder()
             .max_size(nconn as u32)
             .build(manager)?;
@@ -213,8 +235,9 @@ impl SourcePartition for OracleSourcePartition {
     #[throws(OracleSourceError)]
     fn parser(&mut self) -> Self::Parser<'_> {
         let query = self.query.clone();
-        let iter = self.conn.query(query.as_str(), &[])?;
-        OracleTextSourceParser::new(iter, &self.schema)
+
+        // let iter = self.conn.query(query.as_str(), &[])?;
+        OracleTextSourceParser::new(&self.conn, query.as_str(), &self.schema)?
     }
 
     fn nrows(&self) -> usize {
@@ -226,22 +249,37 @@ impl SourcePartition for OracleSourcePartition {
     }
 }
 
+unsafe impl<'a> Send for OracleTextSourceParser<'a> {}
+
 pub struct OracleTextSourceParser<'a> {
-    iter: ResultSet<'a, Row>,
+    rows: OwningHandle<Box<Statement>, DummyBox<ResultSet<'a, Row>>>,
     rowbuf: Vec<Row>,
     ncols: usize,
     current_col: usize,
     current_row: usize,
+    is_finished: bool,
 }
 
 impl<'a> OracleTextSourceParser<'a> {
-    pub fn new(iter: ResultSet<'a, Row>, schema: &[OracleTypeSystem]) -> Self {
+    #[throws(OracleSourceError)]
+    pub fn new(conn: &'a OracleConn, query: &str, schema: &[OracleTypeSystem]) -> Self {
+        let stmt = conn
+            .statement(query)
+            .prefetch_rows(ORACLE_ARRAY_SIZE)
+            .fetch_array_size(ORACLE_ARRAY_SIZE)
+            .build()?;
+        let rows: OwningHandle<Box<Statement>, DummyBox<ResultSet<'a, Row>>> =
+            OwningHandle::new_with_fn(Box::new(stmt), |stmt: *const Statement| unsafe {
+                DummyBox((*(stmt as *mut Statement)).query(&[]).unwrap())
+            });
+
         Self {
-            iter,
+            rows,
             rowbuf: Vec::with_capacity(DB_BUFFER_SIZE),
             ncols: schema.len(),
             current_row: 0,
             current_col: 0,
+            is_finished: false,
         }
     }
 
@@ -260,19 +298,28 @@ impl<'a> PartitionParser<'a> for OracleTextSourceParser<'a> {
 
     #[throws(OracleSourceError)]
     fn fetch_next(&mut self) -> (usize, bool) {
+        assert!(self.current_col == 0);
+        let remaining_rows = self.rowbuf.len() - self.current_row;
+        if remaining_rows > 0 {
+            return (remaining_rows, self.is_finished);
+        } else if self.is_finished {
+            return (0, self.is_finished);
+        }
+
         if !self.rowbuf.is_empty() {
             self.rowbuf.drain(..);
         }
         for _ in 0..DB_BUFFER_SIZE {
-            if let Some(item) = self.iter.next() {
+            if let Some(item) = (*self.rows).next() {
                 self.rowbuf.push(item?);
             } else {
+                self.is_finished = true;
                 break;
             }
         }
         self.current_row = 0;
         self.current_col = 0;
-        (self.rowbuf.len(), self.rowbuf.len() < DB_BUFFER_SIZE)
+        (self.rowbuf.len(), self.is_finished)
     }
 }
 
@@ -304,4 +351,12 @@ macro_rules! impl_produce_text {
     };
 }
 
-impl_produce_text!(i64, f64, String, NaiveDate, NaiveDateTime, DateTime<Utc>,);
+impl_produce_text!(
+    i64,
+    f64,
+    String,
+    NaiveDate,
+    NaiveDateTime,
+    DateTime<Utc>,
+    Vec<u8>,
+);

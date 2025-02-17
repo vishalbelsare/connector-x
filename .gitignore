@@ -1,5 +1,7 @@
+*.swp
+.DS_Store
 **/target
-/.vscode
+.vscode
 connectorx-python/connectorx/*.so
 __pycache__
 .python-version
@@ -13,6 +15,13 @@ data.txt
 profile.pb
 dask-worker-space
 dist
-connectorx-python/README.md
 *.db
 benchmark.json
+docs/_build
+connectorx/examples/test.rs
+*.duckdb
+federated-query/
+flake.nix
+flake.lock
+.envrc
+.direnv/

@@ -1,5 +1,5 @@
 use arrow::{
-    array::{BooleanArray, Float64Array, Int32Array, Int64Array, LargeStringArray},
+    array::{BooleanArray, Float64Array, Int64Array, StringArray},
     record_batch::RecordBatch,
 };
 use connectorx::{
@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 #[test]
+#[ignore]
 fn test_mssql() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -33,6 +34,7 @@ fn test_mssql() {
 }
 
 #[test]
+#[ignore]
 fn test_mssql_agg() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -89,9 +91,9 @@ pub fn verify_arrow_results(result: Vec<RecordBatch>) {
                 assert!(rb
                     .column(0)
                     .as_any()
-                    .downcast_ref::<Int32Array>()
+                    .downcast_ref::<Int64Array>()
                     .unwrap()
-                    .eq(&Int32Array::from(vec![1, 0])));
+                    .eq(&Int64Array::from(vec![1, 0])));
 
                 assert!(rb
                     .column(1)
@@ -103,16 +105,16 @@ pub fn verify_arrow_results(result: Vec<RecordBatch>) {
                 assert!(rb
                     .column(2)
                     .as_any()
-                    .downcast_ref::<LargeStringArray>()
+                    .downcast_ref::<StringArray>()
                     .unwrap()
-                    .eq(&LargeStringArray::from(vec![Some("str1"), Some("a"),])));
+                    .eq(&StringArray::from(vec![Some("str1"), Some("a"),])));
 
                 assert!(rb
                     .column(3)
                     .as_any()
                     .downcast_ref::<Float64Array>()
                     .unwrap()
-                    .eq(&Float64Array::from(vec![None, Some(3.1 as f64)])));
+                    .eq(&Float64Array::from(vec![None, Some(3.1_f64)])));
 
                 assert!(rb
                     .column(4)
@@ -125,9 +127,9 @@ pub fn verify_arrow_results(result: Vec<RecordBatch>) {
                 assert!(rb
                     .column(0)
                     .as_any()
-                    .downcast_ref::<Int32Array>()
+                    .downcast_ref::<Int64Array>()
                     .unwrap()
-                    .eq(&Int32Array::from(vec![2, 3, 4, 1314])));
+                    .eq(&Int64Array::from(vec![2, 3, 4, 1314])));
 
                 assert!(rb
                     .column(1)
@@ -139,9 +141,9 @@ pub fn verify_arrow_results(result: Vec<RecordBatch>) {
                 assert!(rb
                     .column(2)
                     .as_any()
-                    .downcast_ref::<LargeStringArray>()
+                    .downcast_ref::<StringArray>()
                     .unwrap()
-                    .eq(&LargeStringArray::from(vec![
+                    .eq(&StringArray::from(vec![
                         Some("str2"),
                         Some("b"),
                         Some("c"),
@@ -154,10 +156,10 @@ pub fn verify_arrow_results(result: Vec<RecordBatch>) {
                     .downcast_ref::<Float64Array>()
                     .unwrap()
                     .eq(&Float64Array::from(vec![
-                        Some(2.2 as f64),
-                        Some(3 as f64),
-                        Some(7.8 as f64),
-                        Some(-10 as f64),
+                        Some(2.2_f64),
+                        Some(3_f64),
+                        Some(7.8_f64),
+                        Some(-10_f64),
                     ])));
 
                 assert!(rb

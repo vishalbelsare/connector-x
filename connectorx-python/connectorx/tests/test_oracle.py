@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 from pandas.testing import assert_frame_equal
 
-from .. import read_sql
+from .. import read_sql, ConnectionUrl
 
 
 @pytest.fixture(scope="module")  # type: ignore
@@ -12,14 +12,70 @@ def oracle_url() -> str:
     conn = os.environ["ORACLE_URL"]
     return conn
 
-
 @pytest.mark.xfail
 @pytest.mark.skipif(
     not os.environ.get("ORACLE_URL"), reason="Test oracle only when `ORACLE_URL` is set"
 )
-def test_on_non_select(oracle_url: str) -> None:
+def test_oracle_on_non_select(oracle_url: str) -> None:
     query = "CREATE TABLE non_select(id INTEGER NOT NULL)"
+    read_sql(oracle_url, query)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ORACLE_URL"), reason="Test oracle only when `ORACLE_URL` is set"
+)
+def test_oracle_complex_join(oracle_url: str) -> None:
+    query = "SELECT a.test_int, b.test_date, c.test_num_int FROM test_table a left join test_types b on a.test_int = b.test_num_int cross join (select test_num_int from test_types) c where c.test_num_int < 3"
     df = read_sql(oracle_url, query)
+    df = df.sort_values("TEST_INT").reset_index(drop=True)
+    expected = pd.DataFrame(
+        data={
+            "TEST_INT": pd.Series([1, 2, 4, 5, 5, 2333], dtype="Int64"),
+            "TEST_DATE": pd.Series(
+                ["2019-05-21", None, None, "2020-05-21", "2020-05-21", None],
+                dtype="datetime64[ns]",
+            ),
+            "TEST_NUM_INT": pd.Series([1, 1, 1, 1, 1, 1], dtype="Int64"),
+        }
+    )
+    assert_frame_equal(df, expected, check_names=True)
+
+
+def test_oracle_complex_join(oracle_url: str) -> None:
+    query = "SELECT a.test_int, b.test_date, c.test_num_int FROM test_table a left join test_types b on a.test_int = b.test_num_int cross join (select test_num_int from test_types) c where c.test_num_int < 3"
+    df = read_sql(oracle_url, query)
+    df = df.sort_values("TEST_INT").reset_index(drop=True)
+    expected = pd.DataFrame(
+        data={
+            "TEST_INT": pd.Series([1, 2, 4, 5, 5, 2333], dtype="Int64"),
+            "TEST_DATE": pd.Series(
+                ["2019-05-21", None, None, "2020-05-21", "2020-05-21", None],
+                dtype="datetime64[ns]",
+            ),
+            "TEST_NUM_INT": pd.Series([1, 1, 1, 1, 1, 1], dtype="Int64"),
+        }
+    )
+    assert_frame_equal(df, expected, check_names=True)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ORACLE_URL"), reason="Test oracle only when `ORACLE_URL` is set"
+)
+def test_oracle_complex_join(oracle_url: str) -> None:
+    query = "SELECT a.test_int, b.test_date, c.test_num_int FROM test_table a left join test_types b on a.test_int = b.test_num_int cross join (select test_num_int from test_types) c where c.test_num_int < 3"
+    df = read_sql(oracle_url, query)
+    df = df.sort_values("TEST_INT").reset_index(drop=True)
+    expected = pd.DataFrame(
+        data={
+            "TEST_INT": pd.Series([1, 2, 4, 5, 5, 2333], dtype="Int64"),
+            "TEST_DATE": pd.Series(
+                ["2019-05-21", None, None, "2020-05-21", "2020-05-21", None],
+                dtype="datetime64[ns]",
+            ),
+            "TEST_NUM_INT": pd.Series([1, 1, 1, 1, 1, 1], dtype="Int64"),
+        }
+    )
+    assert_frame_equal(df, expected, check_names=True)
 
 
 @pytest.mark.skipif(
@@ -63,9 +119,10 @@ def test_oracle_aggregation2(oracle_url: str) -> None:
     df = read_sql(oracle_url, query)
     expected = pd.DataFrame(
         data={
-            "TEST_CHAR": pd.Series(["str2 ", "str05", None, "str1 "], dtype="object"),
+            "TEST_CHAR": pd.Series(["str05", "str1 ", "str2 ", None], dtype="object"),
         },
     )
+    df.sort_values(by="TEST_CHAR", inplace=True, ignore_index=True)
     assert_frame_equal(df, expected, check_names=True)
 
 
@@ -96,15 +153,15 @@ def test_oracle_manual_partition(oracle_url: str) -> None:
     df = read_sql(oracle_url, query=queries)
     expected = pd.DataFrame(
         data={
-            "TEST_INT": pd.Series([1, 2, 2333, 4, 5], dtype="Int64"),
+            "TEST_INT": pd.Series([1, 2, 4, 5, 2333], dtype="Int64"),
             "TEST_CHAR": pd.Series(
-                ["str1 ", "str2 ", None, None, "str05"], dtype="object"
+                ["str1 ", "str2 ", None, "str05", None], dtype="object"
             ),
-            "TEST_FLOAT": pd.Series([1.1, 2.2, None, -4.44, None], dtype="float64"),
+            "TEST_FLOAT": pd.Series([1.1, 2.2, -4.44, None, None], dtype="float64"),
         },
     )
+    df.sort_values(by="TEST_INT", inplace=True, ignore_index=True)
     assert_frame_equal(df, expected, check_names=True)
-
 
 @pytest.mark.skipif(
     not os.environ.get("ORACLE_URL"), reason="Test oracle only when `ORACLE_URL` is set"
@@ -234,7 +291,7 @@ def test_oracle_with_partition_and_selection(oracle_url: str) -> None:
     not os.environ.get("ORACLE_URL"), reason="Test oracle only when `ORACLE_URL` is set"
 )
 def test_oracle_with_partition_and_spja(oracle_url: str) -> None:
-    query = "select test_table.test_int cid, SUM(test_types.test_num_float) sfloat from test_table, test_types where test_table.test_int=test_types.test_num_int group by test_table.test_int;"
+    query = "select test_table.test_int cid, SUM(test_types.test_num_float) sfloat from test_table, test_types where test_table.test_int=test_types.test_num_int group by test_table.test_int"
     df = read_sql(oracle_url, query, partition_on="cid", partition_num=2)
     expected = pd.DataFrame(
         data={
@@ -252,6 +309,7 @@ def test_oracle_with_partition_and_spja(oracle_url: str) -> None:
 def test_oracle_types(oracle_url: str) -> None:
     query = "SELECT * FROM test_types"
     df = read_sql(oracle_url, query)
+    print(df)
     expected = pd.DataFrame(
         data={
             "TEST_NUM_INT": pd.Series([1, 5, 5, None], dtype="Int64"),
@@ -294,6 +352,12 @@ def test_oracle_types(oracle_url: str) -> None:
                     None,
                 ],
                 dtype="datetime64[ns]",
+            ),
+            "TEST_CLOB": pd.Series(
+                ["13ab", "13ab", "13ab", None], dtype="object"
+            ),
+            "TEST_BLOB": pd.Series(
+                [ b'9\xaf', b'9\xaf', b'9\xaf', None], dtype="object"
             ),
         }
     )
@@ -364,3 +428,23 @@ def test_oracle_cte(oracle_url: str) -> None:
         },
     )
     assert_frame_equal(df, expected, check_names=True)
+
+@pytest.mark.skipif(
+    not os.environ.get("ORACLE_URL"), reason="Test oracle only when `ORACLE_URL` is set"
+)
+def test_oracle_round_function(oracle_url: str) -> None:
+    query = "SELECT round(v,2) TEST_ROUND FROM test_issue"
+    df = read_sql(oracle_url, query)
+    expected = pd.DataFrame(
+        data={
+            "TEST_ROUND": pd.Series([1.11, 2.22, 3.33, None], dtype="float64"),
+        }
+    )
+    assert_frame_equal(df, expected, check_names=True)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ORACLE_URL"), reason="Test oracle only when `ORACLE_URL` is set"
+)
+def test_connection_url(oracle_url: str) -> None:
+    test_oracle_round_function(ConnectionUrl(oracle_url))

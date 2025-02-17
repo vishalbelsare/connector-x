@@ -38,17 +38,17 @@ def main() -> None:
     if args["copy-extension"]:
         if METADATA["platform"] == "windows":
             suffix = ".dll"
-            src = Path("../target/release/connectorx_python")
+            src = Path("./target/release/connectorx")
         elif METADATA["platform"] == "linux":
             suffix = ".so"
-            src = Path("../target/release/libconnectorx_python")
+            src = Path("./target/release/libconnectorx")
         elif METADATA["platform"] == "darwin":
             suffix = ".dylib"
-            src = Path("../target/release/libconnectorx_python")
+            src = Path("./target/release/libconnectorx")
         else:
             raise NotImplementedError(f"platform '{METADATA['platform']}' not supported")
 
-        dst = Path("./connectorx/connectorx_python")
+        dst = Path("./connectorx/connectorx")
         copyfile(src.with_suffix(suffix), dst.with_suffix(METADATA["ext_suffix"]))
     elif args["rename-wheel"]:
         pyver = f"{METADATA['major']}{METADATA['minor']}"
@@ -61,7 +61,7 @@ def main() -> None:
             else:
                 abitag = pyver
         elif METADATA["platform"] == "linux":
-            arch = "manylinux2014_x86_64"
+            arch = "manylinux_2_28_x86_64"
             abitag = METADATA["abi_tag"]
         elif METADATA["platform"] == "darwin":
             arch = "macosx_10_15_intel"

@@ -1,11 +1,13 @@
-use super::{check_dtype, HasPandasColumn, PandasColumn, PandasColumnObject};
+use super::{
+    check_dtype, ExtractBlockFromBound, HasPandasColumn, PandasColumn, PandasColumnObject,
+};
 use crate::errors::ConnectorXPythonError;
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use fehler::throws;
 use ndarray::{ArrayViewMut2, Axis, Ix2};
-use numpy::PyArray;
-use pyo3::{FromPyObject, PyAny, PyResult};
+use numpy::{PyArray, PyArrayMethods};
+use pyo3::{types::PyAnyMethods, PyAny, PyResult};
 use std::any::TypeId;
 
 // datetime64 is represented in int64 in numpy
@@ -14,8 +16,8 @@ pub struct DateTimeBlock<'a> {
     data: ArrayViewMut2<'a, i64>,
 }
 
-impl<'a> FromPyObject<'a> for DateTimeBlock<'a> {
-    fn extract(ob: &'a PyAny) -> PyResult<Self> {
+impl<'a> ExtractBlockFromBound<'a> for DateTimeBlock<'a> {
+    fn extract_block<'b: 'a>(ob: &'b pyo3::Bound<'a, PyAny>) -> PyResult<Self> {
         check_dtype(ob, "int64")?;
         let array = ob.downcast::<PyArray<i64, Ix2>>()?;
         let data = unsafe { array.as_array_mut() };
@@ -35,7 +37,7 @@ impl<'a> DateTimeBlock<'a> {
             view = rest;
             ret.push(DateTimeColumn {
                 data: col
-                    .into_shape(nrows)?
+                    .into_shape_with_order(nrows)?
                     .into_slice()
                     .ok_or_else(|| anyhow!("get None for splitted DateTime data"))?
                     .as_mut_ptr(),
@@ -65,7 +67,11 @@ impl PandasColumnObject for DateTimeColumn {
 impl PandasColumn<DateTime<Utc>> for DateTimeColumn {
     #[throws(ConnectorXPythonError)]
     fn write(&mut self, val: DateTime<Utc>, row: usize) {
-        unsafe { *self.data.add(row) = val.timestamp_nanos() };
+        unsafe {
+            *self.data.add(row) = val
+                .timestamp_nanos_opt()
+                .unwrap_or_else(|| panic!("out of range DateTime"))
+        };
     }
 }
 
@@ -74,7 +80,12 @@ impl PandasColumn<Option<DateTime<Utc>>> for DateTimeColumn {
     fn write(&mut self, val: Option<DateTime<Utc>>, row: usize) {
         // numpy use i64::MIN as NaT
         unsafe {
-            *self.data.add(row) = val.map(|t| t.timestamp_nanos()).unwrap_or(i64::MIN);
+            *self.data.add(row) = val
+                .map(|t| {
+                    t.timestamp_nanos_opt()
+                        .unwrap_or_else(|| panic!("out of range DateTime"))
+                })
+                .unwrap_or(i64::MIN);
         };
     }
 }

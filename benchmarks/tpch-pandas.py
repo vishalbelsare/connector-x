@@ -53,6 +53,9 @@ if __name__ == "__main__":
                 "l_shipdate",
                 "l_commitdate",
                 "l_receiptdate",
+                "L_SHIPDATE",
+                "L_COMMITDATE",
+                "L_RECEIPTDATE",
             ],
         )
     print(f"[Total] {timer.elapsed:.2f}s")
@@ -61,3 +64,4 @@ if __name__ == "__main__":
     print(df.head())
     print(df.tail())
     print(len(df))
+    print(df.dtypes)

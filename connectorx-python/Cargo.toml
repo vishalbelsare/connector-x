@@ -2,47 +2,49 @@
 authors = ["Weiyuan Wu <youngw@sfu.ca>"]
 edition = "2018"
 name = "connectorx-python"
-version = "0.2.3-alpha.3"
+version = "0.4.2"
+license = "MIT"
+readme = "README.md"
+
+[workspace]
+# prevents package from thinking it's in the workspace
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1"
-arrow = "5"
+arrow = { version = "53" }
 bitfield = "0.13"
-bytes = "1"
+bytes = "1.4"
 chrono = "0.4"
 connectorx = {path = "../connectorx", default-features = false}
-dict_derive = "0.4"
 env_logger = "0.9"
 fehler = "1"
-itertools = "0.10"
-lazy_static = "1.4.0"
+itertools = "0.14"
+lazy_static = "1.4"
 libc = "0.2"
 log = "0.4"
-ndarray = "0.15"
-numpy = "0.14"
-postgres = {version = "0.19", features = ["with-chrono-0_4", "with-uuid-0_8", "with-serde_json-1"]}
+ndarray = "0.16"
+numpy = {version = "0.22", features = ["gil-refs"]}
+openssl = {version = "0.10", features = ["vendored"]}
+postgres = {version = "0.19", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"]}
 postgres-native-tls = {version = "0.5"}
-pyo3 = {version = "0.14", default-features = false, features = ["macros"]}
-pyo3-built = "0.4"
-r2d2-oracle = {version = "0.5.0", features = ["chrono"]}
-r2d2_mysql = {version = "21.0"}
-rusqlite = {version = "0.25", features = ["column_decltype", "chrono", "bundled"]}
+postgres-openssl = {version = "0.5.0"}
+pyo3 = {version = "0.22", default-features = false, features = ["macros", "gil-refs", "py-clone"]}
+pyo3-built = "0.5"
 rust_decimal = {version = "1", features = ["db-postgres"]}
-rust_decimal_macros = "1"
 serde_json = "1"
-sqlparser = "0.11"
+sqlparser = "0.37"
 thiserror = "1"
-tiberius = "0.5"
 tokio = {version = "1", features = ["rt", "rt-multi-thread", "net"]}
-tokio-util = "0.6"
 url = "2"
 urlencoding = "2.1"
-uuid = "0.8"
+uuid = "1"
+rayon = "1"
 
 [build-dependencies]
 built = {version = "0.5", features = ["chrono"]}
+pyo3-build-config = {version = "0.22", features = ["resolve-config"]}
 
 [dev-dependencies]
 criterion = "0.3"
@@ -51,16 +53,30 @@ iai = "0.1"
 pprof = {version = "0.5", features = ["flamegraph", "criterion", "protobuf"]}
 rayon = "1"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(Py_3_12)'] }
+
 [lib]
-crate-type = ["rlib", "cdylib"]
-name = "connectorx_python"
+crate-type = ["cdylib"]
+name = "connectorx"
 
 [features]
 branch = ["connectorx/branch"]
-default = ["extension", "fptr", "nbstr", "dsts", "srcs"]
+default = ["extension", "fptr", "nbstr", "dsts", "srcs", "federation", "fed_exec"]
 dsts = ["connectorx/dst_arrow"]
 executable = ["pyo3/auto-initialize"]
 extension = ["pyo3/extension-module"]
 fptr = ["connectorx/fptr"]
+federation = ["connectorx/federation"]
+fed_exec = ["connectorx/fed_exec"]
 nbstr = []
-srcs = ["connectorx/src_postgres", "connectorx/src_mysql", "connectorx/src_sqlite", "connectorx/src_mssql", "connectorx/src_oracle"]
+srcs = [
+  "connectorx/src_postgres",
+  "connectorx/src_mysql",
+  "connectorx/src_sqlite",
+  "connectorx/src_mssql",
+  "connectorx/src_oracle",
+  "connectorx/src_bigquery",
+  "connectorx/src_trino",
+]
+integrated-auth-gssapi = ["connectorx/integrated-auth-gssapi"]

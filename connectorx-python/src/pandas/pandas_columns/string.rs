@@ -1,13 +1,16 @@
 use super::super::pystring::{PyString, StringInfo};
-use super::{check_dtype, HasPandasColumn, PandasColumn, PandasColumnObject, GIL_MUTEX};
+use super::{
+    check_dtype, ExtractBlockFromBound, HasPandasColumn, PandasColumn, PandasColumnObject,
+    GIL_MUTEX,
+};
 use crate::constants::PYSTRING_BUFFER_SIZE;
 use crate::errors::ConnectorXPythonError;
 use anyhow::anyhow;
 use fehler::throws;
 use itertools::Itertools;
 use ndarray::{ArrayViewMut2, Axis, Ix2};
-use numpy::PyArray;
-use pyo3::{FromPyObject, PyAny, PyResult, Python};
+use numpy::{PyArray, PyArrayMethods};
+use pyo3::{types::PyAnyMethods, PyAny, PyResult, Python};
 use std::any::TypeId;
 
 pub struct StringBlock<'a> {
@@ -15,8 +18,8 @@ pub struct StringBlock<'a> {
     buf_size_mb: usize,
 }
 
-impl<'a> FromPyObject<'a> for StringBlock<'a> {
-    fn extract(ob: &'a PyAny) -> PyResult<Self> {
+impl<'a> ExtractBlockFromBound<'a> for StringBlock<'a> {
+    fn extract_block<'b: 'a>(ob: &'b pyo3::Bound<'a, PyAny>) -> PyResult<Self> {
         check_dtype(ob, "object")?;
         let array = ob.downcast::<PyArray<PyString, Ix2>>()?;
         let data = unsafe { array.as_array_mut() };
@@ -39,7 +42,7 @@ impl<'a> StringBlock<'a> {
             view = rest;
             ret.push(StringColumn {
                 data: col
-                    .into_shape(nrows)?
+                    .into_shape_with_order(nrows)?
                     .into_slice()
                     .ok_or_else(|| anyhow!("get None for splitted String data"))?
                     .as_mut_ptr(),
@@ -265,27 +268,30 @@ impl StringColumn {
                 Err(_) => return,
             }
         };
-        let py = unsafe { Python::assume_gil_acquired() };
 
+        // NOTE: from Python 3.12, we have to allocate the string with a real Python<'py> token
+        // previous `let py = unsafe { Python::assume_gil_acquired() }` approach will lead to segment fault when partition is enabled
         let mut string_infos = Vec::with_capacity(self.string_lengths.len());
-        let mut start = 0;
-        for (i, &len) in self.string_lengths.iter().enumerate() {
-            if len != usize::MAX {
-                let end = start + len;
+        Python::with_gil(|py| {
+            let mut start = 0;
+            for (i, &len) in self.string_lengths.iter().enumerate() {
+                if len != usize::MAX {
+                    let end = start + len;
 
-                unsafe {
-                    let string_info = StringInfo::detect(&self.string_buf[start..end]);
-                    *self.data.add(self.row_idx[i]) = string_info.pystring(py);
-                    string_infos.push(Some(string_info));
-                };
+                    unsafe {
+                        let string_info = StringInfo::detect(&self.string_buf[start..end]);
+                        *self.data.add(self.row_idx[i]) = string_info.pystring(py);
+                        string_infos.push(Some(string_info));
+                    };
 
-                start = end;
-            } else {
-                string_infos.push(None);
+                    start = end;
+                } else {
+                    string_infos.push(None);
 
-                unsafe { *self.data.add(self.row_idx[i]) = PyString::none(py) };
+                    unsafe { *self.data.add(self.row_idx[i]) = PyString::none(py) };
+                }
             }
-        }
+        });
 
         // unlock GIL
         std::mem::drop(guard);

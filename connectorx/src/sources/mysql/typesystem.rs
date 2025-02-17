@@ -31,6 +31,7 @@ pub enum MySQLTypeSystem {
     MediumBlob(bool),
     LongBlob(bool),
     Json(bool),
+    Bit(bool),
 }
 
 impl_typesystem! {
@@ -51,7 +52,7 @@ impl_typesystem! {
         { Time => NaiveTime }
         { Decimal => Decimal }
         { Char | VarChar | Enum => String }
-        { TinyBlob | Blob | MediumBlob | LongBlob => Vec<u8>}
+        { TinyBlob | Blob | MediumBlob | LongBlob | Bit => Vec<u8>}
         { Json => Value }
     }
 }
@@ -103,6 +104,7 @@ impl<'a> From<(&'a ColumnType, &'a ColumnFlags)> for MySQLTypeSystem {
             ColumnType::MYSQL_TYPE_DATETIME => Datetime(null_ok),
             ColumnType::MYSQL_TYPE_DATE => Date(null_ok),
             ColumnType::MYSQL_TYPE_TIME => Time(null_ok),
+            ColumnType::MYSQL_TYPE_DECIMAL => Decimal(null_ok),
             ColumnType::MYSQL_TYPE_NEWDECIMAL => Decimal(null_ok),
             ColumnType::MYSQL_TYPE_STRING => Char(null_ok),
             ColumnType::MYSQL_TYPE_VAR_STRING => VarChar(null_ok),
@@ -114,6 +116,8 @@ impl<'a> From<(&'a ColumnType, &'a ColumnFlags)> for MySQLTypeSystem {
             ColumnType::MYSQL_TYPE_MEDIUM_BLOB => MediumBlob(null_ok),
             ColumnType::MYSQL_TYPE_LONG_BLOB => LongBlob(null_ok),
             ColumnType::MYSQL_TYPE_JSON => Json(null_ok),
+            ColumnType::MYSQL_TYPE_VARCHAR => VarChar(null_ok),
+            ColumnType::MYSQL_TYPE_BIT => Bit(null_ok),
             _ => unimplemented!("{}", format!("{:?}", ty)),
         }
     }

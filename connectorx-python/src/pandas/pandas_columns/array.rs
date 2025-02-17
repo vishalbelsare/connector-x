@@ -1,10 +1,13 @@
-use super::{check_dtype, HasPandasColumn, PandasColumn, PandasColumnObject, GIL_MUTEX};
+use super::{
+    check_dtype, ExtractBlockFromBound, HasPandasColumn, PandasColumn, PandasColumnObject,
+    GIL_MUTEX,
+};
 use crate::errors::ConnectorXPythonError;
 use anyhow::anyhow;
 use fehler::throws;
 use ndarray::{ArrayViewMut2, Axis, Ix2};
-use numpy::{npyffi::NPY_TYPES, Element, PyArray, PyArrayDescr};
-use pyo3::{FromPyObject, Py, PyAny, PyResult, Python, ToPyObject};
+use numpy::{Element, PyArray, PyArrayDescr, PyArrayMethods};
+use pyo3::{types::PyAnyMethods, Bound, Py, PyAny, PyResult, Python, ToPyObject};
 use std::any::TypeId;
 use std::marker::PhantomData;
 
@@ -13,10 +16,14 @@ use std::marker::PhantomData;
 pub struct PyList(Py<pyo3::types::PyList>);
 
 // In order to put it into a numpy array
-impl Element for PyList {
-    const DATA_TYPE: numpy::DataType = numpy::DataType::Object;
-    fn is_same_type(dtype: &PyArrayDescr) -> bool {
-        unsafe { *dtype.as_dtype_ptr() }.type_num == NPY_TYPES::NPY_OBJECT as i32
+unsafe impl Element for PyList {
+    const IS_COPY: bool = false;
+    fn get_dtype_bound(py: Python<'_>) -> Bound<'_, PyArrayDescr> {
+        PyArrayDescr::object_bound(py)
+    }
+
+    fn clone_ref(&self, _py: Python<'_>) -> Self {
+        Self(self.0.clone())
     }
 }
 
@@ -26,8 +33,8 @@ pub struct ArrayBlock<'a, V> {
     _value_type: PhantomData<V>,
 }
 
-impl<'a, V> FromPyObject<'a> for ArrayBlock<'a, V> {
-    fn extract(ob: &'a PyAny) -> PyResult<Self> {
+impl<'a, V> ExtractBlockFromBound<'a> for ArrayBlock<'a, V> {
+    fn extract_block<'b: 'a>(ob: &'b pyo3::Bound<'a, PyAny>) -> PyResult<Self> {
         check_dtype(ob, "object")?;
         let array = ob.downcast::<PyArray<PyList, Ix2>>()?;
         let data = unsafe { array.as_array_mut() };
@@ -51,7 +58,7 @@ impl<'a, V> ArrayBlock<'a, V> {
             view = rest;
             ret.push(ArrayColumn::<V> {
                 data: col
-                    .into_shape(nrows)?
+                    .into_shape_with_order(nrows)?
                     .into_slice()
                     .ok_or_else(|| anyhow!("get None for splitted FloatArray data"))?
                     .as_mut_ptr(),
@@ -94,6 +101,33 @@ where
     }
 }
 
+impl PandasColumn<Vec<bool>> for ArrayColumn<bool> {
+    #[throws(ConnectorXPythonError)]
+    fn write(&mut self, val: Vec<bool>, row: usize) {
+        self.lengths.push(val.len());
+        self.buffer.extend_from_slice(&val[..]);
+        self.row_idx.push(row);
+        self.try_flush()?;
+    }
+}
+
+impl PandasColumn<Option<Vec<bool>>> for ArrayColumn<bool> {
+    #[throws(ConnectorXPythonError)]
+    fn write(&mut self, val: Option<Vec<bool>>, row: usize) {
+        match val {
+            Some(v) => {
+                self.lengths.push(v.len());
+                self.buffer.extend_from_slice(&v[..]);
+                self.row_idx.push(row);
+                self.try_flush()?;
+            }
+            None => {
+                self.lengths.push(usize::MAX);
+                self.row_idx.push(row);
+            }
+        }
+    }
+}
 impl PandasColumn<Vec<f64>> for ArrayColumn<f64> {
     #[throws(ConnectorXPythonError)]
     fn write(&mut self, val: Vec<f64>, row: usize) {
@@ -150,6 +184,14 @@ impl PandasColumn<Option<Vec<i64>>> for ArrayColumn<i64> {
     }
 }
 
+impl HasPandasColumn for Vec<bool> {
+    type PandasColumn<'a> = ArrayColumn<bool>;
+}
+
+impl HasPandasColumn for Option<Vec<bool>> {
+    type PandasColumn<'a> = ArrayColumn<bool>;
+}
+
 impl HasPandasColumn for Vec<f64> {
     type PandasColumn<'a> = ArrayColumn<f64>;
 }
@@ -189,9 +231,7 @@ where
         let nvecs = self.lengths.len();
 
         if nvecs > 0 {
-            let py = unsafe { Python::assume_gil_acquired() };
-
-            {
+            Python::with_gil(|py| -> Result<(), ConnectorXPythonError> {
                 // allocation in python is not thread safe
                 let _guard = GIL_MUTEX
                     .lock()
@@ -202,19 +242,20 @@ where
                         let end = start + len;
                         unsafe {
                             // allocate and write in the same time
-                            *self.data.add(self.row_idx[i]) = PyList(
-                                pyo3::types::PyList::new(py, &self.buffer[start..end]).into(),
-                            );
+                            let n = pyo3::types::PyList::new_bound(py, &self.buffer[start..end])
+                                .unbind();
+                            *self.data.add(self.row_idx[i]) = PyList(n);
                         };
                         start = end;
                     } else {
                         unsafe {
-                            let n = Py::from_owned_ptr(py, pyo3::ffi::Py_None());
+                            let n = Py::from_borrowed_ptr(py, pyo3::ffi::Py_None());
                             *self.data.add(self.row_idx[i]) = PyList(n);
                         }
                     }
                 }
-            }
+                Ok(())
+            })?;
 
             self.buffer.truncate(0);
             self.lengths.truncate(0);

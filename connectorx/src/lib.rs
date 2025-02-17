@@ -1,5 +1,3 @@
-#![feature(generic_associated_types)]
-#![allow(incomplete_features)]
 #![allow(clippy::upper_case_acronyms)]
 
 //! # ConnectorX
@@ -94,7 +92,7 @@
 //! use connectorx::prelude::*;
 //!
 //! let mut destination = ArrowDestination::new();
-//! let source = SQLiteSource::new("sqlite:///path/to/db", 10).expect("cannot create the source");
+//! let source = SQLiteSource::new("/path/to/db", 10).expect("cannot create the source");
 //! let queries = &["SELECT * FROM db WHERE id < 100", "SELECT * FROM db WHERE id >= 100"];
 //! let dispatcher = Dispatcher::<SQLiteSource, ArrowDestination, SQLiteArrowTransport>::new(source, &mut destination, queries, None);
 //! dispatcher.run().expect("run failed");
@@ -102,42 +100,65 @@
 //! let data = destination.arrow();
 //! ```
 //!
+//! Or simply you can directly use the [`get_arrow::get_arrow`] in which we wrapped the above procedures:
+//!
+//! ```no_run
+//! use connectorx::prelude::*;
+//! use std::convert::TryFrom;
+//!
+//! let mut source_conn = SourceConn::try_from("postgresql://username:password@host:port/db?cxprotocol=binary").expect("parse conn str failed");
+//! let queries = &[CXQuery::from("SELECT * FROM table WHERE id < 100"), CXQuery::from("SELECT * FROM table WHERE id >= 100")];
+//! let destination = get_arrow(&source_conn, None, queries).expect("run failed");
+//!
+//! let data = destination.arrow();
+//! ```
+//!
+//! NOTE: the pool size parameter `nconn` used in initializing the source should be larger than or equal to the number of partitioned queries input later.
+//!
 //! ## Need more examples?
 //! You can use the existing implementation as the example.
 //! [MySQL source](https://github.com/sfu-db/connector-x/tree/main/connectorx/src/sources/mysql),
 //! [Arrow destination](https://github.com/sfu-db/connector-x/tree/main/connectorx/src/destinations/arrow),
 //! [MySQL to Arrow transport](https://github.com/sfu-db/connector-x/blob/main/connectorx/src/transports/mysql_arrow.rs).
 //!
-//! # Sources & Destinations that is implemented in the Rust core.
+//! # Sources protocols & Destinations that is implemented in the Rust core.
 //!
 //! ## Sources
 //! - [x] Postgres
 //! - [x] Mysql
 //! - [x] Sqlite
-//! - [x] Redshift (through postgres protocol)
-//! - [x] Clickhouse (through mysql protocol)
 //! - [x] SQL Server
+//! - [x] Oracle
+//! - [x] BigQuery
 //!
 //! ## Destinations
-//! - [x] PyArrow
-//! - [x] Modin
-//! - [x] Dask
+//! - [x] Arrow
 //! - [x] Polars
 //!
 //! # Feature gates
 //! By default, ConnectorX does not enable any sources / destinations to keep the dependencies minimal.
-//! Instead, we provide following features for you to opt-in: `src_sqlite`, `src_postgres`, `src_mysql`, `src_mssql`, `src_oracle`, `dst_arrow`, `dst_arrow2`.
+//! Instead, we provide following features for you to opt-in: `src_sqlite`, `src_postgres`, `src_mysql`, `src_mssql`, `src_oracle`, `dst_arrow`, `dst_polars`.
 //! For example, if you'd like to load data from Postgres to Arrow, you can enable `src_postgres` and `dst_arrow` in `Cargo.toml`.
 //! This will enable [`sources::postgres`], [`destinations::arrow`] and [`transports::PostgresArrowTransport`].
 
 pub mod typesystem;
 #[macro_use]
 mod macros;
+#[cfg(feature = "dst_arrow")]
+pub mod arrow_batch_iter;
 pub mod constants;
 pub mod data_order;
 pub mod destinations;
 mod dispatcher;
 pub mod errors;
+#[cfg(feature = "fed_exec")]
+pub mod fed_dispatcher;
+#[cfg(feature = "federation")]
+pub mod fed_rewriter;
+#[cfg(feature = "dst_arrow")]
+pub mod get_arrow;
+pub mod partition;
+pub mod source_router;
 pub mod sources;
 #[doc(hidden)]
 pub mod sql;
@@ -146,12 +167,27 @@ pub mod transports;
 pub mod utils;
 
 pub mod prelude {
+    #[cfg(feature = "dst_arrow")]
+    pub use crate::arrow_batch_iter::{set_global_num_thread, RecordBatchIterator};
     pub use crate::data_order::{coordinate, DataOrder};
     #[cfg(feature = "dst_arrow")]
-    pub use crate::destinations::arrow::ArrowDestination;
+    pub use crate::destinations::arrow::{ArrowDestination, ArrowPartitionWriter, ArrowTypeSystem};
+    #[cfg(feature = "dst_arrow")]
+    pub use crate::destinations::arrowstream::{
+        ArrowDestination as ArrowStreamDestination,
+        ArrowPartitionWriter as ArrowStreamPartitionWriter,
+        ArrowTypeSystem as ArrowStreamTypeSystem,
+    };
     pub use crate::destinations::{Consume, Destination, DestinationPartition};
     pub use crate::dispatcher::Dispatcher;
-    pub use crate::errors::ConnectorXError;
+    pub use crate::errors::{ConnectorXError, ConnectorXOutError};
+    #[cfg(feature = "federation")]
+    pub use crate::fed_rewriter::{rewrite_sql, FederatedDataSourceInfo, Plan};
+    #[cfg(feature = "dst_arrow")]
+    pub use crate::get_arrow::{get_arrow, new_record_batch_iter};
+    pub use crate::source_router::*;
+    #[cfg(feature = "src_bigquery")]
+    pub use crate::sources::bigquery::BigQuerySource;
     #[cfg(feature = "src_csv")]
     pub use crate::sources::csv::CSVSource;
     #[cfg(feature = "src_dummy")]
@@ -166,7 +202,10 @@ pub mod prelude {
     pub use crate::sources::postgres::PostgresSource;
     #[cfg(feature = "src_sqlite")]
     pub use crate::sources::sqlite::SQLiteSource;
+    #[cfg(feature = "src_trino")]
+    pub use crate::sources::trino::TrinoSource;
     pub use crate::sources::{PartitionParser, Produce, Source, SourcePartition};
+    pub use crate::sql::CXQuery;
     pub use crate::transports::*;
     pub use crate::typesystem::{
         ParameterizedFunc, ParameterizedOn, Realize, Transport, TypeAssoc, TypeConversion,

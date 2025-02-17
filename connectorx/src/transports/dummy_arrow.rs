@@ -34,18 +34,22 @@ impl_transport!(
 
 impl TypeConversion<DateTime<Utc>, NaiveDateTime> for DummyArrowTransport {
     fn convert(val: DateTime<Utc>) -> NaiveDateTime {
-        NaiveDateTime::from_timestamp(val.timestamp(), val.timestamp_subsec_nanos())
+        val.naive_utc()
     }
 }
 
 impl TypeConversion<NaiveDateTime, DateTime<Utc>> for DummyArrowTransport {
     fn convert(val: NaiveDateTime) -> DateTime<Utc> {
-        DateTime::from_utc(val, Utc)
+        DateTime::from_naive_utc_and_offset(val, Utc)
     }
 }
 
 impl TypeConversion<NaiveDate, DateTime<Utc>> for DummyArrowTransport {
     fn convert(val: NaiveDate) -> DateTime<Utc> {
-        DateTime::from_utc(val.and_hms(0, 0, 0), Utc)
+        DateTime::from_naive_utc_and_offset(
+            val.and_hms_opt(0, 0, 0)
+                .unwrap_or_else(|| panic!("and_hms_opt return None")),
+            Utc,
+        )
     }
 }
